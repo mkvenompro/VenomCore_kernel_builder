@@ -1,299 +1,544 @@
-name: 🐍 VenomCore Kernel Builder (spinel)
-
-# Builds from the ASSEMBLED tree (produced by the "VenomCore Tree Assembler"
-# workflow) instead of raw MiCode sources. Run the assembler first at least once.
-# Maintainer: MkVenomPro
+name: 🐍 Build VenomCore
 
 on:
   workflow_dispatch:
     inputs:
-      source_branch:
-        description: "Branch in THIS repo holding the assembled tree"
+      defconfig:
+        description: "Kernel defconfig"
         required: true
-        default: "spinel-assembled"
-      ksu_variant:
-        description: "Root solution"
-        required: true
-        default: "KernelSU-Next"
-        type: choice
-        options:
-          - KernelSU-Next
-          - SukiSU-Ultra
-      susfs_enabled:
-        description: "Enable SUSFS"
+        default: "defconfig"
+        type: string
+
+      clean:
+        description: "Clean output directory before build"
         required: true
         default: true
         type: boolean
-      kernel_name:
-        description: "Kernel build name (shown in kernel version string)"
-        required: true
-        default: "VenomCore"
 
-env:
-  KERNEL_DIR: kernel_workspace
-  ARCH: arm64
+      build_modules:
+        description: "Build kernel modules"
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
 
 jobs:
   build:
-    name: Build ${{ inputs.kernel_name }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 180
+    name: Build VenomCore
+    runs-on: ubuntu-24.04
+
+    env:
+      ARCH: arm64
+      SUBARCH: arm64
+      DEFCONFIG: ${{ inputs.defconfig }}
+      OUT_DIR: ${{ github.workspace }}/out
+
+      # LLVM/Clang
+      LLVM: 1
+      LLVM_IAS: 1
+
+      # Kernel source is the repository root
+      KERNEL_DIR: ${{ github.workspace }}
 
     steps:
-      - name: Maximize build space
-        uses: easimon/maximize-build-space@master
+
+      # ============================================================
+      # Checkout
+      # ============================================================
+
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
         with:
-          root-reserve-mb: 8192
-          swap-size-mb: 4096
-          remove-dotnet: true
-          remove-android: true
-          remove-haskell: true
-          remove-codeql: true
+          ref: spinel-assembled
+          fetch-depth: 1
+          submodules: false
 
-      - name: Install dependencies
+      # ============================================================
+      # System information
+      # ============================================================
+
+      - name: Show build environment
+        shell: bash
         run: |
           set -e
+
+          echo "=========================================="
+          echo " VenomCore Kernel Builder"
+          echo "=========================================="
+          echo
+          echo "Repository : $GITHUB_REPOSITORY"
+          echo "Branch     : $GITHUB_REF_NAME"
+          echo "Commit     : $GITHUB_SHA"
+          echo "Kernel dir : $KERNEL_DIR"
+          echo "Output dir : $OUT_DIR"
+          echo "Defconfig  : $DEFCONFIG"
+          echo
+          echo "CPU:"
+          nproc
+          echo
+          echo "Clang:"
+          clang --version || true
+          echo
+          echo "GCC:"
+          gcc --version | head -n 1 || true
+          echo
+          echo "=========================================="
+
+      # ============================================================
+      # Dependencies
+      # ============================================================
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -e
+
           sudo apt-get update
+
           sudo apt-get install -y \
-            bc bison build-essential ccache curl flex \
-            g++-multilib gcc-multilib git gnupg gperf \
-            imagemagick lib32ncurses-dev lib32readline-dev \
-            lib32z1-dev liblz4-tool libncurses-dev \
-            libsdl1.2-dev libssl-dev libxml2 libxml2-utils \
-            lzop pngcrush rsync schedtool squashfs-tools \
-            xsltproc zip zlib1g-dev python3 python3-pip \
-            device-tree-compiler libc6-dev-i386
+            bc \
+            bison \
+            build-essential \
+            ca-certificates \
+            clang \
+            cpio \
+            curl \
+            flex \
+            git \
+            libelf-dev \
+            libssl-dev \
+            lld \
+            llvm \
+            python3 \
+            python3-pip \
+            rsync \
+            unzip \
+            wget \
+            xz-utils \
+            zip \
+            zstd
 
-      - name: Clone assembled tree from ${{ inputs.source_branch }} (this repo)
+      # ============================================================
+      # Verify kernel source
+      # ============================================================
+
+      - name: Verify kernel source tree
+        shell: bash
         run: |
           set -e
-          git clone --depth=1 -b "${{ inputs.source_branch }}" \
-            "https://github.com/${{ github.repository }}.git" "$KERNEL_DIR"
-          echo "--- assembled tree top-level ---"
-          ls "$KERNEL_DIR"
-          if [ ! -f "$KERNEL_DIR/VENOMCORE_ASSEMBLY.md" ]; then
-            echo "::error::this doesn't look like an assembled tree (no VENOMCORE_ASSEMBLY.md) — run the assembler workflow first"
+
+          cd "$KERNEL_DIR"
+
+          echo "Checking kernel source..."
+
+          if [ ! -f Makefile ]; then
+            echo "::error::Kernel Makefile not found."
             exit 1
           fi
 
-      - name: Locate defconfig
-        working-directory: ${{ env.KERNEL_DIR }}
-        run: |
-          set -e
-          FOUND=$(find arch/${ARCH}/configs -iname "*spinel*defconfig*" 2>/dev/null | head -n1)
-          if [ -z "$FOUND" ]; then
-            echo "::warning::no defconfig matching *spinel* found under arch/${ARCH}/configs — listing what exists so you can pick manually"
-            ls "arch/${ARCH}/configs" || true
-            echo "::error::set DEFCONFIG manually once you see the real file name above, then re-run"
+          if [ ! -d arch/arm64 ]; then
+            echo "::error::arch/arm64 directory not found."
             exit 1
           fi
-          DEFCONFIG_NAME=$(basename "$FOUND")
-          echo "Found defconfig: $DEFCONFIG_NAME"
-          echo "DEFCONFIG=$DEFCONFIG_NAME" >> $GITHUB_ENV
 
-      - name: Set up Clang toolchain
-        run: |
-          set -e
-          mkdir -p clang
-          git clone --depth=1 -b master-kernel-build-2021 \
-            https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 clang
-          CLANG_BIN_DIR=$(find clang -maxdepth 2 -type d -name 'bin' | head -n1)
-          echo "$CLANG_BIN_DIR" >> $GITHUB_PATH
-          echo "Clang resolved at: $CLANG_BIN_DIR"
-
-      - name: Verify clang is on PATH
-        run: |
-          set -e
-          which clang || (echo "::error::clang not found on PATH after toolchain step" && exit 1)
-          clang --version
-
-      - name: Set up KernelSU-Next
-        if: ${{ inputs.ksu_variant == 'KernelSU-Next' }}
-        working-directory: ${{ env.KERNEL_DIR }}
-        run: |
-          set -e
-          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s next
-          echo "KSU_GIT_VERSION=$(cd KernelSU-Next && git rev-list --count HEAD)" >> $GITHUB_ENV
-
-      - name: Set up SukiSU-Ultra
-        if: ${{ inputs.ksu_variant == 'SukiSU-Ultra' }}
-        working-directory: ${{ env.KERNEL_DIR }}
-        run: |
-          set -e
-          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-main
-
-      - name: Apply SUSFS patches
-        if: ${{ inputs.susfs_enabled }}
-        working-directory: ${{ env.KERNEL_DIR }}
-        run: |
-          git clone --depth=1 -b kernel-5.10 https://gitlab.com/simonpunk/susfs4ksu.git susfs4ksu
-
-          cp susfs4ksu/kernel_patches/fs/* fs/ 2>/dev/null || true
-          cp susfs4ksu/kernel_patches/include/linux/* include/linux/ 2>/dev/null || true
-
-          patch -p1 < susfs4ksu/kernel_patches/50_add_susfs_in_kernel-5.10.patch || \
-            echo "::warning::susfs kernel patch had rejects — layout may differ from stock GKI tree, resolve manually before shipping"
-
-          if [ -d KernelSU-Next ]; then
-            cp susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch KernelSU-Next/ 2>/dev/null || true
-            (cd KernelSU-Next && patch -p1 < 10_enable_susfs_for_ksu.patch) || \
-              echo "::warning::susfs KSU patch had rejects — resolve manually before shipping"
-          fi
-
-      - name: Apply defconfig flags
-        working-directory: ${{ env.KERNEL_DIR }}
-        run: |
-          set -e
-          CFG="arch/${ARCH}/configs/${DEFCONFIG}"
-          if [ ! -f "$CFG" ]; then
-            echo "::error::defconfig not found at $CFG"
+          if [ ! -d arch/arm64/configs ]; then
+            echo "::error::arch/arm64/configs directory not found."
             exit 1
           fi
-          echo "CONFIG_KSU=y" >> "$CFG"
-          echo "CONFIG_KSU_SUSFS=${{ inputs.susfs_enabled && 'y' || 'n' }}" >> "$CFG"
-          echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> "$CFG"
-          echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> "$CFG"
-          echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> "$CFG"
-          echo "CONFIG_KSU_SUSFS_SUS_SU=n" >> "$CFG"
-          echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> "$CFG"
-          echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> "$CFG"
-          echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> "$CFG"
-          echo "CONFIG_LOCALVERSION=\"-${{ inputs.kernel_name }}\"" >> "$CFG"
+
+          echo
+          echo "Kernel version:"
+          make kernelversion
+
+          echo
+          echo "Available ARM64 configs:"
+          find arch/arm64/configs -maxdepth 1 -type f \
+            -printf '%f\n' | sort
+
+          echo
+          echo "Source tree looks valid."
+
+      # ============================================================
+      # Verify selected defconfig
+      # ============================================================
+
+      - name: Verify defconfig
+        shell: bash
+        run: |
+          set -e
+
+          cd "$KERNEL_DIR"
+
+          CONFIG="arch/arm64/configs/${DEFCONFIG}"
+
+          echo "Selected defconfig:"
+          echo "$CONFIG"
+
+          if [ ! -f "$CONFIG" ]; then
+            echo
+            echo "::error::Defconfig '$DEFCONFIG' does not exist."
+            echo
+            echo "Available configs:"
+            find arch/arm64/configs -maxdepth 1 -type f \
+              -printf '%f\n' | sort
+            exit 1
+          fi
+
+          echo
+          echo "Defconfig found successfully."
+
+      # ============================================================
+      # Prepare output directory
+      # ============================================================
+
+      - name: Prepare output directory
+        shell: bash
+        run: |
+          set -e
+
+          if [ "${{ inputs.clean }}" = "true" ]; then
+            echo "Cleaning output directory..."
+            rm -rf "$OUT_DIR"
+          fi
+
+          mkdir -p "$OUT_DIR"
+
+          echo "Output directory:"
+          echo "$OUT_DIR"
+
+      # ============================================================
+      # Configure kernel
+      # ============================================================
+
+      - name: Configure kernel
+        shell: bash
+        run: |
+          set -e
+
+          cd "$KERNEL_DIR"
+
+          echo "=========================================="
+          echo " Configuring kernel"
+          echo "=========================================="
+          echo
+          echo "Defconfig: $DEFCONFIG"
+          echo
+
+          make \
+            O="$OUT_DIR" \
+            ARCH="$ARCH" \
+            LLVM="$LLVM" \
+            LLVM_IAS="$LLVM_IAS" \
+            "$DEFCONFIG"
+
+          echo
+          echo "Kernel configuration completed."
+
+      # ============================================================
+      # Show important configuration
+      # ============================================================
+
+      - name: Check kernel configuration
+        shell: bash
+        run: |
+          set -e
+
+          CONFIG="$OUT_DIR/.config"
+
+          if [ ! -f "$CONFIG" ]; then
+            echo "::error::.config was not generated."
+            exit 1
+          fi
+
+          echo "=========================================="
+          echo " Important configuration"
+          echo "=========================================="
+
+          grep -E \
+            '^(CONFIG_ARCH_MEDIATEK|CONFIG_MTK|CONFIG_MODULES|CONFIG_KPROBES|CONFIG_KALLSYMS|CONFIG_LTO_CLANG|CONFIG_CFI_CLANG)=' \
+            "$CONFIG" || true
+
+          echo
+          echo "Config size:"
+          wc -l "$CONFIG"
+
+      # ============================================================
+      # Build kernel
+      # ============================================================
 
       - name: Build kernel
-        working-directory: ${{ env.KERNEL_DIR }}
+        shell: bash
         run: |
           set -e
-          export ARCH=${ARCH}
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          export CLANG_TRIPLE=aarch64-linux-gnu-
-          export CC=clang
 
-          make O=out "${DEFCONFIG}"
-          make O=out -j"$(nproc --all)" 2>&1 | tee build.log
+          cd "$KERNEL_DIR"
 
-      - name: Package boot image
-        working-directory: ${{ env.KERNEL_DIR }}
+          echo "=========================================="
+          echo " Building VenomCore"
+          echo "=========================================="
+          echo
+          echo "Architecture : $ARCH"
+          echo "Defconfig    : $DEFCONFIG"
+          echo "Output       : $OUT_DIR"
+          echo "CPU cores    : $(nproc)"
+          echo
+
+          make \
+            -C "$KERNEL_DIR" \
+            O="$OUT_DIR" \
+            ARCH="$ARCH" \
+            LLVM="$LLVM" \
+            LLVM_IAS="$LLVM_IAS" \
+            -j"$(nproc)"
+
+      # ============================================================
+      # Build modules
+      # ============================================================
+
+      - name: Build modules
+        if: ${{ inputs.build_modules }}
+        shell: bash
         run: |
           set -e
-          mkdir -p ../VenomCore-out
-          IMG=$(find out -name "Image.gz-dtb" -o -name "Image.gz" -o -name "Image" | head -n1)
-          if [ -z "$IMG" ]; then
-            echo "::error::no kernel Image produced — check build.log"
-            exit 1
+
+          cd "$KERNEL_DIR"
+
+          echo "=========================================="
+          echo " Building kernel modules"
+          echo "=========================================="
+
+          make \
+            -C "$KERNEL_DIR" \
+            O="$OUT_DIR" \
+            ARCH="$ARCH" \
+            LLVM="$LLVM" \
+            LLVM_IAS="$LLVM_IAS" \
+            modules \
+            -j"$(nproc)"
+
+      # ============================================================
+      # Collect build information
+      # ============================================================
+
+      - name: Collect build information
+        if: always()
+        shell: bash
+        run: |
+          set +e
+
+          mkdir -p "$OUT_DIR/artifacts"
+
+          echo "==========================================" \
+            > "$OUT_DIR/artifacts/build-info.txt"
+
+          echo " VenomCore Build Information" \
+            >> "$OUT_DIR/artifacts/build-info.txt"
+
+          echo "==========================================" \
+            >> "$OUT_DIR/artifacts/build-info.txt"
+
+          echo \
+            >> "$OUT_DIR/artifacts/build-info.txt"
+
+          echo "Repository: $GITHUB_REPOSITORY" \
+            >> "$OUT_DIR/artifacts/build-info.txt"
+
+          echo "Branch: $GITHUB_REF_NAME" \
+            >> "$OUT_DIR/artifacts/build-info.txt"
+
+          echo "Commit: $GITHUB_SHA" \
+            >> "$OUT_DIR/artifacts/build-info.txt"
+
+          echo "Defconfig: $DEFCONFIG" \
+            >> "$OUT_DIR/artifacts/build-info.txt"
+
+          echo "Kernel version:" \
+            >> "$OUT_DIR/artifacts/build-info.txt"
+
+          make \
+            -C "$KERNEL_DIR" \
+            kernelversion \
+            >> "$OUT_DIR/artifacts/build-info.txt" 2>&1
+
+          echo \
+            >> "$OUT_DIR/artifacts/build-info.txt"
+
+          echo "Clang:" \
+            >> "$OUT_DIR/artifacts/build-info.txt"
+
+          clang --version \
+            >> "$OUT_DIR/artifacts/build-info.txt" 2>&1
+
+          echo \
+            >> "$OUT_DIR/artifacts/build-info.txt"
+
+          echo "Build date:" \
+            >> "$OUT_DIR/artifacts/build-info.txt"
+
+          date -u \
+            >> "$OUT_DIR/artifacts/build-info.txt"
+
+      # ============================================================
+      # Copy kernel image
+      # ============================================================
+
+      - name: Collect kernel image
+        if: always()
+        shell: bash
+        run: |
+          set +e
+
+          mkdir -p "$OUT_DIR/artifacts"
+
+          echo "Searching for kernel Image..."
+
+          if [ -f "$OUT_DIR/arch/arm64/boot/Image" ]; then
+            cp \
+              "$OUT_DIR/arch/arm64/boot/Image" \
+              "$OUT_DIR/artifacts/Image"
+
+            echo "Image copied."
+          else
+            echo "::warning::Image not found."
           fi
-          cp "$IMG" ../VenomCore-out/Image
 
-      - name: Clone AnyKernel3 template
+          if [ -f "$OUT_DIR/arch/arm64/boot/Image.gz" ]; then
+            cp \
+              "$OUT_DIR/arch/arm64/boot/Image.gz" \
+              "$OUT_DIR/artifacts/Image.gz"
+
+            echo "Image.gz copied."
+          fi
+
+          if [ -f "$OUT_DIR/arch/arm64/boot/Image.lz4" ]; then
+            cp \
+              "$OUT_DIR/arch/arm64/boot/Image.lz4" \
+              "$OUT_DIR/artifacts/Image.lz4"
+
+            echo "Image.lz4 copied."
+          fi
+
+      # ============================================================
+      # Collect DTBs / DTBOs
+      # ============================================================
+
+      - name: Collect DTB and DTBO files
+        if: always()
+        shell: bash
+        run: |
+          set +e
+
+          mkdir -p "$OUT_DIR/artifacts/dtb"
+
+          echo "Searching for DTB files..."
+
+          find "$OUT_DIR/arch/arm64/boot" \
+            -type f \
+            \( \
+              -name "*.dtb" \
+              -o \
+              -name "*.dtbo" \
+            \) \
+            -exec cp --parents {} "$OUT_DIR/artifacts/dtb/" \; \
+            2>/dev/null || true
+
+          echo
+          echo "Collected DT files:"
+          find "$OUT_DIR/artifacts/dtb" \
+            -type f \
+            -print \
+            2>/dev/null || true
+
+      # ============================================================
+      # Collect modules
+      # ============================================================
+
+      - name: Collect modules
+        if: ${{ inputs.build_modules }}
+        shell: bash
+        run: |
+          set +e
+
+          mkdir -p "$OUT_DIR/artifacts/modules"
+
+          echo "Searching for kernel modules..."
+
+          find "$OUT_DIR" \
+            -type f \
+            -name "*.ko" \
+            -exec cp --parents {} "$OUT_DIR/artifacts/modules/" \; \
+            2>/dev/null || true
+
+          echo
+          echo "Module count:"
+          find "$OUT_DIR/artifacts/modules" \
+            -type f \
+            -name "*.ko" \
+            2>/dev/null | wc -l
+
+      # ============================================================
+      # Save .config
+      # ============================================================
+
+      - name: Collect .config
+        if: always()
+        shell: bash
         run: |
           set -e
-          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
-          rm -rf AnyKernel3/.git AnyKernel3/ramdisk AnyKernel3/patch
-          rm -f AnyKernel3/tools/keycheck AnyKernel3/anykernel.sh
-          cp VenomCore-out/Image AnyKernel3/Image
 
-      - name: Write anykernel.sh (VenomCore branded)
+          if [ -f "$OUT_DIR/.config" ]; then
+            cp \
+              "$OUT_DIR/.config" \
+              "$OUT_DIR/artifacts/kernel.config"
+          fi
+
+      # ============================================================
+      # Generate manifest
+      # ============================================================
+
+      - name: Generate artifact manifest
+        if: always()
+        shell: bash
         run: |
-          cat > AnyKernel3/anykernel.sh << 'EOF'
-          ### AnyKernel3 Ramdisk Mod Script
-          ## osm0sis @ xda-developers
+          set +e
 
-          ### AnyKernel setup
-          properties() { '
-          kernel.string=VenomCore Kernel by MkVenomPro | spinel
-          do.devicecheck=1
-          do.modules=0
-          do.systemless=1
-          do.cleanup=1
-          do.cleanuponabort=0
-          device.name1=spinel
-          supported.versions=15
-          supported.patchlevels=
-          '; }
+          cd "$OUT_DIR/artifacts"
 
-          ### AnyKernel methods (DO NOT CHANGE)
-          . tools/ak3-core.sh
+          echo "VenomCore artifact manifest" \
+            > manifest.txt
 
-          ### AnyKernel install
-          ui_print " "
-          ui_print " "
-          ui_print "░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░"
-          ui_print " "
-          ui_print "   ██╗   ██╗███████╗███╗   ██╗ ██████╗ ███╗   ███╗"
-          ui_print "   ██║   ██║██╔════╝████╗  ██║██╔═══██╗████╗ ████║"
-          ui_print "   ██║   ██║█████╗  ██╔██╗ ██║██║   ██║██╔████╔██║"
-          ui_print "   ╚██╗ ██╔╝██╔══╝  ██║╚██╗██║██║   ██║██║╚██╔╝██║"
-          ui_print "    ╚████╔╝ ███████╗██║ ╚████║╚██████╔╝██║ ╚═╝ ██║"
-          ui_print "     ╚═══╝  ╚══════╝╚═╝  ╚═══╝ ╚═════╝ ╚═╝     ╚═╝"
-          ui_print " "
-          ui_print "            C  O  R  E   K  E  R  N  E  L"
-          ui_print " "
-          ui_print "░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░"
-          ui_print " "
-          ui_print "        🐍  crafted by @MkVenomPro  🐍"
-          ui_print " "
-          ui_print "───────────────────────────────────────"
-          ui_print "  Device .... Redmi Note 15 4G (spinel)"
-          ui_print "  Root ...... ${{ inputs.ksu_variant }}"
-          ui_print "  SUSFS ..... ${{ inputs.susfs_enabled }}"
-          ui_print "  Build ..... #${{ github.run_number }}"
-          ui_print "───────────────────────────────────────"
-          ui_print " "
-          ui_print "  >> Injecting VenomCore into boot..."
-          ui_print " "
+          echo \
+            >> manifest.txt
 
-          dump_boot
+          find . \
+            -type f \
+            -printf '%p\n' \
+            | sort \
+            >> manifest.txt
 
-          # kernel Image is already staged as ./Image by the workflow
-          write_boot
+          echo
+          echo "=========================================="
+          echo " Artifacts"
+          echo "=========================================="
 
-          ui_print " "
-          ui_print "───────────────────────────────────────"
-          ui_print "   ✔  VENOMCORE INSTALLED SUCCESSFULLY"
-          ui_print "───────────────────────────────────────"
-          ui_print " "
-          ui_print "   Reboot the device and enjoy the bite."
-          ui_print " "
-          ui_print "        🐍  @MkVenomPro  🐍"
-          ui_print " "
-          EOF
+          find . \
+            -type f \
+            -printf '%p\n' \
+            | sort
 
-      - name: Package VenomCore AnyKernel3 zip
-        run: |
-          set -e
-          ZIP_NAME="VenomCore-spinel-${{ inputs.ksu_variant }}-build${{ github.run_number }}.zip"
-          cd AnyKernel3
-          zip -r9 "../$ZIP_NAME" . -x ".git*"
-          cd ..
-          echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
+      # ============================================================
+      # Upload artifact
+      # ============================================================
 
-      - name: Upload build log (always, for debugging)
+      - name: Upload VenomCore artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: VenomCore-build-log
-          path: ${{ env.KERNEL_DIR }}/build.log
-          if-no-files-found: ignore
-
-      - name: Upload VenomCore raw kernel image
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ inputs.kernel_name }}-spinel-raw-${{ github.run_number }}
-          path: VenomCore-out/Image
-          retention-days: 14
-
-      - name: Upload VenomCore flashable zip
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.ZIP_NAME }}
-          path: ${{ env.ZIP_NAME }}
-          retention-days: 14
-
-      - name: Summary
-        if: always()
-        run: |
-          echo "### 🐍 ${{ inputs.kernel_name }} build finished" >> $GITHUB_STEP_SUMMARY
-          echo "- Source branch: ${{ inputs.source_branch }} (assembled tree, this repo)" >> $GITHUB_STEP_SUMMARY
-          echo "- Root: ${{ inputs.ksu_variant }}" >> $GITHUB_STEP_SUMMARY
-          echo "- SUSFS: ${{ inputs.susfs_enabled }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Defconfig used: ${DEFCONFIG:-not resolved}" >> $GITHUB_STEP_SUMMARY
+          name: VenomCore-spinel-${{ github.run_number }}
+          path: |
+            ${{ github.workspace }}/out/artifacts/**
+          if-no-files-found: warn
+          compression-level: 6
+          retention-days: 30
