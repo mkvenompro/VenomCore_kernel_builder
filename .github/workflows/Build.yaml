@@ -66,7 +66,7 @@ jobs:
 
 
       # ============================================================
-      # INSTALL DEPENDENCIES
+      # INSTALL HOST DEPENDENCIES
       # ============================================================
 
       - name: Install dependencies
@@ -117,6 +117,94 @@ jobs:
 
 
       # ============================================================
+      # INSTALL OLD NCURSES COMPATIBILITY FOR ANDROID CLANG
+      # ============================================================
+
+      - name: Install Clang compatibility libraries
+
+        run: |
+
+          set -e
+
+          echo "=========================================="
+          echo " Installing Clang compatibility libraries"
+          echo "=========================================="
+
+          sudo apt-get update
+
+
+          # --------------------------------------------------------
+          # Ubuntu 24.04 does not provide libncurses.so.5 directly.
+          #
+          # The Android kernel Clang toolchain used by this workflow
+          # is an older prebuilt toolchain and expects:
+          #
+          #   libncurses.so.5
+          #   libtinfo.so.5
+          #
+          # We obtain the compatible Ubuntu Jammy packages without
+          # changing the runner's normal package sources.
+          # --------------------------------------------------------
+
+          WORKDIR="${RUNNER_TEMP}/ncurses5"
+
+          rm -rf "$WORKDIR"
+
+          mkdir -p "$WORKDIR"
+
+          cd "$WORKDIR"
+
+
+          echo
+          echo "--- Downloading ncurses 5 compatibility packages ---"
+
+
+          curl -fL \
+            -o libtinfo5.deb \
+            "https://archive.ubuntu.com/ubuntu/pool/main/n/ncurses/libtinfo5_6.3-2ubuntu0.1_amd64.deb"
+
+
+          curl -fL \
+            -o libncurses5.deb \
+            "https://archive.ubuntu.com/ubuntu/pool/main/n/ncurses/libncurses5_6.3-2ubuntu0.1_amd64.deb"
+
+
+          echo
+          echo "--- Installing compatibility packages ---"
+
+
+          sudo dpkg -i \
+            ./libtinfo5.deb \
+            ./libncurses5.deb
+
+
+          echo
+          echo "--- Checking libraries ---"
+
+
+          ldconfig -p | grep -E 'libncurses\.so\.5|libtinfo\.so\.5' || true
+
+
+          echo
+          echo "--- Library files ---"
+
+
+          find /usr/lib \
+            -type f \
+            \( \
+              -name "libncurses.so.5*" \
+              -o \
+              -name "libtinfo.so.5*" \
+            \) \
+            -print \
+            2>/dev/null || true
+
+
+          echo
+          echo "Clang compatibility libraries installed."
+
+
+      # ============================================================
       # VERIFY HOST TOOLS
       # ============================================================
 
@@ -130,32 +218,40 @@ jobs:
           echo " Host tool verification"
           echo "=========================================="
 
+
           echo
           echo "make:"
           make --version | head -n1
+
 
           echo
           echo "python:"
           python3 --version
 
+
           echo
           echo "git:"
           git --version
+
 
           echo
           echo "bc:"
           bc --version | head -n1
 
+
           echo
           echo "dtc:"
           dtc --version
 
+
           echo
           echo "AArch64 binutils:"
+
           which aarch64-linux-gnu-ld
           which aarch64-linux-gnu-as
           which aarch64-linux-gnu-objcopy
           which aarch64-linux-gnu-strip
+
 
           echo
           aarch64-linux-gnu-ld --version | head -n1
@@ -175,11 +271,13 @@ jobs:
           echo " Cloning VenomCore assembled kernel tree"
           echo "=========================================="
 
+
           git clone \
             --depth=1 \
             -b "${{ inputs.source_branch }}" \
             "https://github.com/${{ github.repository }}.git" \
             "$KERNEL_DIR"
+
 
           echo
           echo "--- repository root ---"
@@ -236,15 +334,18 @@ jobs:
           echo " VenomCore tree inspection"
           echo "=========================================="
 
+
           echo
           echo "--- Git commit ---"
 
           git log -1 --oneline
 
+
           echo
           echo "--- Kernel version ---"
 
           make kernelversion
+
 
           echo
           echo "--- ARM64 configs ---"
@@ -255,21 +356,33 @@ jobs:
             -printf "%f\n" \
             | sort
 
+
           echo
           echo "--- MTK tree ---"
 
+
           if [ -d drivers/misc/mediatek ]; then
+
             echo "drivers/misc/mediatek: FOUND"
+
           else
+
             echo "drivers/misc/mediatek: NOT FOUND"
+
           fi
+
 
           echo
 
+
           if [ -d vendor/mtk_modules_raw ]; then
+
             echo "vendor/mtk_modules_raw: FOUND"
+
           else
+
             echo "vendor/mtk_modules_raw: NOT FOUND"
+
           fi
 
 
@@ -287,14 +400,17 @@ jobs:
 
           CONFIG_DIR="arch/${ARCH}/configs"
 
+
           echo "=========================================="
           echo " Locating defconfig"
           echo "=========================================="
+
 
           echo
           echo "--- Available configs ---"
 
           ls -lah "$CONFIG_DIR"
+
 
           echo
 
@@ -364,7 +480,9 @@ jobs:
           echo " Setting up Android Clang"
           echo "=========================================="
 
+
           rm -rf clang
+
 
           git clone \
             --depth=1 \
@@ -379,7 +497,7 @@ jobs:
 
           CLANG_BIN_DIR=$(find clang \
             -type f \
-            -name clang \
+            -name clang.real \
             -printf '%h\n' \
             | head -n1)
 
@@ -396,6 +514,7 @@ jobs:
           echo "Clang directory:"
           echo "$CLANG_BIN_DIR"
 
+
           echo "$CLANG_BIN_DIR" >> "$GITHUB_PATH"
 
 
@@ -406,7 +525,7 @@ jobs:
 
 
       # ============================================================
-      # VERIFY CLANG
+      # VERIFY CLANG + LIBRARIES
       # ============================================================
 
       - name: Verify Clang
@@ -419,30 +538,52 @@ jobs:
           echo " Clang verification"
           echo "=========================================="
 
+
           which clang
 
+
           echo
+          echo "clang version:"
+
           clang --version
+
 
           echo
           echo "clang++:"
+
           which clang++
+
 
           echo
           echo "ld.lld:"
+
           which ld.lld || true
 
+
           echo
-          echo "llvm-ar:"
+          echo "LLVM tools:"
+
           which llvm-ar || true
-
-          echo
-          echo "llvm-nm:"
           which llvm-nm || true
+          which llvm-objcopy || true
+
 
           echo
-          echo "llvm-objcopy:"
-          which llvm-objcopy || true
+          echo "=========================================="
+          echo " Checking ncurses compatibility"
+          echo "=========================================="
+
+
+          ldconfig -p | grep -E 'libncurses\.so\.5|libtinfo\.so\.5'
+
+
+          echo
+          echo "=========================================="
+          echo " Testing Clang executable"
+          echo "=========================================="
+
+
+          clang.real --version
 
 
       # ============================================================
@@ -463,6 +604,7 @@ jobs:
           echo " Setting up KernelSU-Next"
           echo "=========================================="
 
+
           curl -LSs \
             "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
             | bash -s next
@@ -482,7 +624,9 @@ jobs:
 
           git -C KernelSU-Next log -1 --oneline
 
+
           KSU_GIT_VERSION=$(git -C KernelSU-Next rev-list --count HEAD)
+
 
           echo "KSU_GIT_VERSION=$KSU_GIT_VERSION" >> "$GITHUB_ENV"
 
@@ -505,6 +649,7 @@ jobs:
           echo " Setting up SukiSU-Ultra"
           echo "=========================================="
 
+
           curl -LSs \
             "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" \
             | bash -s susfs-main
@@ -517,6 +662,7 @@ jobs:
             exit 1
 
           fi
+
 
           echo "SukiSU-Ultra setup completed."
 
@@ -540,11 +686,13 @@ jobs:
           echo " Android 12 / Linux 5.10"
           echo "=========================================="
 
+
           rm -rf susfs4ksu
 
 
           echo
           echo "--- Cloning SUSFS ---"
+
 
           git clone \
             --depth=1 \
@@ -568,12 +716,13 @@ jobs:
             | sort
 
 
-          # ========================================================
-          # COPY SUSFS FS
-          # ========================================================
+          # --------------------------------------------------------
+          # SUSFS filesystem files
+          # --------------------------------------------------------
 
           echo
           echo "--- Copying SUSFS fs files ---"
+
 
           if [ ! -d susfs4ksu/kernel_patches/fs ]; then
 
@@ -589,12 +738,13 @@ jobs:
             fs/
 
 
-          # ========================================================
-          # COPY SUSFS HEADERS
-          # ========================================================
+          # --------------------------------------------------------
+          # SUSFS headers
+          # --------------------------------------------------------
 
           echo
           echo "--- Copying SUSFS headers ---"
+
 
           if [ ! -d susfs4ksu/kernel_patches/include/linux ]; then
 
@@ -610,21 +760,16 @@ jobs:
             include/linux/
 
 
-          # ========================================================
-          # SUSFS KERNEL PATCH
-          #
-          # IMPORTANT:
-          # The actual patch name on gki-android12-5.10 is:
-          #
-          # 50_add_susfs_in_gki-android12-5.10.patch
-          #
-          # ========================================================
+          # --------------------------------------------------------
+          # SUSFS kernel patch
+          # --------------------------------------------------------
 
           SUSFS_KERNEL_PATCH="susfs4ksu/kernel_patches/50_add_susfs_in_gki-android12-5.10.patch"
 
 
           echo
           echo "--- Checking SUSFS kernel patch ---"
+
 
           if [ ! -f "$SUSFS_KERNEL_PATCH" ]; then
 
@@ -634,8 +779,10 @@ jobs:
             echo "Expected:"
             echo "$SUSFS_KERNEL_PATCH"
 
+
             echo
             echo "Available patches:"
+
 
             find susfs4ksu/kernel_patches \
               -maxdepth 1 \
@@ -643,6 +790,7 @@ jobs:
               -name "*.patch" \
               -printf '%f\n' \
               | sort
+
 
             exit 1
 
@@ -653,12 +801,13 @@ jobs:
           echo "$SUSFS_KERNEL_PATCH"
 
 
-          # ========================================================
-          # APPLY SUSFS KERNEL PATCH
-          # ========================================================
+          # --------------------------------------------------------
+          # Apply SUSFS kernel patch
+          # --------------------------------------------------------
 
           echo
           echo "--- Applying SUSFS kernel patch ---"
+
 
           patch \
             --batch \
@@ -667,9 +816,9 @@ jobs:
             < "$SUSFS_KERNEL_PATCH"
 
 
-          # ========================================================
-          # KERNELSU SUSFS PATCH
-          # ========================================================
+          # --------------------------------------------------------
+          # KernelSU SUSFS integration
+          # --------------------------------------------------------
 
           echo
           echo "--- Applying SUSFS KernelSU integration ---"
@@ -768,9 +917,6 @@ jobs:
           echo "=========================================="
 
 
-          # Remove duplicate values if the workflow is rerun
-          # against a reused tree.
-
           sed -i \
             -e '/^CONFIG_KSU=/d' \
             -e '/^CONFIG_KSU_SUSFS=/d' \
@@ -826,6 +972,7 @@ jobs:
         run: |
 
           set -o pipefail
+
 
           echo "=========================================="
           echo " VenomCore Kernel Build"
@@ -902,7 +1049,7 @@ jobs:
 
 
           # ========================================================
-          # CHECK CONFIG
+          # CONFIG CHECK
           # ========================================================
 
           echo
@@ -930,7 +1077,7 @@ jobs:
 
 
           # ========================================================
-          # BUILD
+          # COMPILE
           # ========================================================
 
           echo
@@ -954,12 +1101,12 @@ jobs:
 
 
           # ========================================================
-          # VERIFY IMAGE
+          # VERIFY OUTPUT
           # ========================================================
 
           echo
           echo "=========================================="
-          echo " Verifying kernel image"
+          echo " Verifying kernel output"
           echo "=========================================="
 
 
@@ -1040,6 +1187,7 @@ jobs:
 
           echo
           echo "Raw image:"
+
           ls -lh ../VenomCore-out/Image
 
 
@@ -1090,7 +1238,7 @@ jobs:
 
 
       # ============================================================
-      # WRITE ANYKERNEL SCRIPT
+      # ANYKERNEL SCRIPT
       # ============================================================
 
       - name: Write VenomCore AnyKernel script
@@ -1207,7 +1355,7 @@ jobs:
 
 
       # ============================================================
-      # PACKAGE ZIP
+      # PACKAGE ANYKERNEL ZIP
       # ============================================================
 
       - name: Package VenomCore AnyKernel3 ZIP
@@ -1351,6 +1499,7 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
 
           echo "### Output" >> "$GITHUB_STEP_SUMMARY"
+
 
           if [ -f VenomCore-out/Image ]; then
 
