@@ -1,0 +1,129 @@
+name: 🧩 VenomCore Tree Assembler (spinel)
+
+# Merges the raw MiCode sources into ONE proper kernel tree and pushes it
+# to a branch in THIS repo, so the build workflow has something sane to build from.
+#
+# Sources merged:
+#   - MiCode/Xiaomi_Kernel_OpenSource (spinel-v-oss)   -> base kernel tree
+#   - MiCode/MTK_kernel_modules       (spinel-v-oss)   -> merged into the tree
+#   - MiCode/kernel_build             (spinel-v-oss)   -> kept as kernel_build/ for reference
+#
+# Result is pushed (squashed, single commit) to: spinel-assembled
+# Maintainer: MkVenomPro
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_branch:
+        description: "Branch in THIS repo to push the assembled tree to"
+        required: true
+        default: "spinel-assembled"
+
+permissions:
+  contents: write
+
+env:
+  KERNEL_BRANCH: spinel-v-oss
+  KERNEL_REPO: https://github.com/MiCode/Xiaomi_Kernel_OpenSource
+  MTK_MODULES_REPO: https://github.com/MiCode/MTK_kernel_modules
+  KERNEL_BUILD_REPO: https://github.com/MiCode/kernel_build
+  WORKDIR: assembled_tree
+
+jobs:
+  assemble:
+    name: Assemble spinel tree
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 4096
+          remove-dotnet: true
+          remove-android: true
+          remove-haskell: true
+          remove-codeql: true
+
+      - name: Clone base kernel tree (Xiaomi_Kernel_OpenSource, ${{ env.KERNEL_BRANCH }})
+        run: |
+          set -e
+          git clone --depth=1 -b "$KERNEL_BRANCH" "$KERNEL_REPO" "$WORKDIR"
+          echo "--- top-level of base tree ---"
+          ls "$WORKDIR"
+
+      - name: Clone MTK kernel modules (${{ env.KERNEL_BRANCH }})
+        run: |
+          set -e
+          git clone --depth=1 -b "$KERNEL_BRANCH" "$MTK_MODULES_REPO" mtk_modules_src
+          echo "--- top-level of MTK modules ---"
+          ls mtk_modules_src
+
+      - name: Merge MTK modules into the tree
+        run: |
+          set -e
+          # Known merge points from similar MT68xx/MT69xx trees:
+          #   drivers/misc/mediatek/  and  drivers/gpu/mediatek/
+          # We overlay anything matching that shape, and ALSO keep a raw copy
+          # under vendor/mtk_modules/ so nothing is silently dropped if the
+          # folder layout in this particular dump doesn't match 1:1.
+          mkdir -p "$WORKDIR/vendor/mtk_modules_raw"
+          rsync -a mtk_modules_src/ "$WORKDIR/vendor/mtk_modules_raw/" --exclude=".git"
+
+          if [ -d "mtk_modules_src/drivers" ]; then
+            echo "Found drivers/ in MTK modules — merging directly into tree drivers/"
+            rsync -a mtk_modules_src/drivers/ "$WORKDIR/drivers/"
+          fi
+
+          echo "::notice::Raw MTK modules also preserved under vendor/mtk_modules_raw/ — inspect it and adjust merge paths in this step if it doesn't match drivers/misc/mediatek or drivers/gpu/mediatek."
+
+      - name: Clone kernel_build (kept for reference, not merged into source)
+        run: |
+          set -e
+          git clone --depth=1 -b "$KERNEL_BRANCH" "$KERNEL_BUILD_REPO" "$WORKDIR/kernel_build"
+          rm -rf "$WORKDIR/kernel_build/.git"
+
+      - name: Write assembly notes into the tree
+        run: |
+          cat > "$WORKDIR/VENOMCORE_ASSEMBLY.md" << 'EOF'
+          # VenomCore assembled tree — spinel
+
+          Assembled automatically by the "VenomCore Tree Assembler" workflow.
+
+          Sources merged (all branch: spinel-v-oss):
+          - MiCode/Xiaomi_Kernel_OpenSource -> base tree (this repo root)
+          - MiCode/MTK_kernel_modules       -> merged into drivers/ where possible,
+                                               full raw copy kept in vendor/mtk_modules_raw/
+          - MiCode/kernel_build             -> kept under kernel_build/ (build scripts, unmerged)
+
+          Base tag: alps-mp-s0.mp1.tc8sp2-cs1-xm.V1.143.1
+
+          ⚠️ This is a MECHANICAL merge (rsync overlay), not a verified working
+          kernel tree. The MTK modules merge path is a best guess based on a
+          similar MT6789 device (yunluo) — check vendor/mtk_modules_raw/ and
+          confirm the real drivers/ layout before trusting a build from this.
+
+          Regenerate this branch any time by re-running the assembler workflow.
+          EOF
+
+      - name: Commit and push assembled tree
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          set -e
+          git init
+          git config user.name "VenomCore Assembler Bot"
+          git config user.email "actions@github.com"
+          git checkout -b "${{ inputs.target_branch }}"
+          git add -A
+          git commit -m "VenomCore: assemble spinel tree ($(date -u +%Y-%m-%d))"
+
+          git remote add origin "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
+          git push --force origin "${{ inputs.target_branch }}"
+
+      - name: Summary
+        run: |
+          echo "### 🧩 spinel tree assembled" >> $GITHUB_STEP_SUMMARY
+          echo "- Pushed to branch: \`${{ inputs.target_branch }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Base: Xiaomi_Kernel_OpenSource @ $KERNEL_BRANCH" >> $GITHUB_STEP_SUMMARY
+          echo "- MTK modules merged into drivers/ (best-effort) + raw copy in vendor/mtk_modules_raw/" >> $GITHUB_STEP_SUMMARY
+          echo "- ⚠️ Review VENOMCORE_ASSEMBLY.md in that branch before building from it" >> $GITHUB_STEP_SUMMARY
