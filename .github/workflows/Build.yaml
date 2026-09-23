@@ -639,6 +639,33 @@ jobs:
       # PACKAGE
       # ============================================================
 
+      - name: Verify connectivity modules were picked up
+        if: always()
+        working-directory: ${{ env.KERNEL_DIR }}/kernel-5.10
+        run: |
+          set +e
+          echo "=============================================="
+          echo " Checking if the WLAN/connectivity symlinks were created"
+          echo "=============================================="
+
+          CONN_DIR="drivers/misc/mediatek/connectivity"
+
+          for link in wmt_drv wmt_chrdev_wifi wlan_drv_gen4m; do
+            if [ -L "$CONN_DIR/$link" ]; then
+              echo "OK: $CONN_DIR/$link -> $(readlink -f "$CONN_DIR/$link")"
+            else
+              echo "::warning::$CONN_DIR/$link symlink NOT found — connectivity modules were not picked up"
+            fi
+          done
+
+          echo
+          echo "Looking for compiled WLAN objects/modules..."
+          find out -iname "*gen4m*" -o -iname "*wlan*.ko" -o -iname "*wmt*.o" 2>/dev/null | head -n 20
+
+          echo
+          echo "Relevant CONFIG entries in the final .config:"
+          grep -iE 'CONFIG_MTK_COMBO|CONFIG_WLAN|CONFIG_MTK_CONNECTIVITY' out/.config || echo "(none found — connectivity block may not be enabled in this defconfig)"
+
       - name: Package artifacts
         if: success()
         working-directory: ${{ env.KERNEL_DIR }}/kernel-5.10
