@@ -1,0 +1,177 @@
+name: 🐍 VenomCore Kernel Builder (spinel)
+
+# VenomCore — custom kernel build for Xiaomi Redmi Note 15 4G (spinel)
+# Base: MiCode spinel-v-oss (kernel 5.10, Android 15) + KernelSU-Next + SUSFS
+# Maintainer: MkVenomPro
+
+on:
+  workflow_dispatch:
+    inputs:
+      ksu_variant:
+        description: "Root solution"
+        required: true
+        default: "KernelSU-Next"
+        type: choice
+        options:
+          - KernelSU-Next
+          - SukiSU-Ultra
+      susfs_enabled:
+        description: "Enable SUSFS"
+        required: true
+        default: true
+        type: boolean
+      kernel_name:
+        description: "Kernel build name (shown in kernel version string)"
+        required: true
+        default: "VenomCore"
+
+env:
+  DEVICE_CODENAME: spinel
+  KERNEL_BRANCH: spinel-v-oss
+  KERNEL_REPO: https://github.com/MiCode/Xiaomi_Kernel_OpenSource
+  KERNEL_BUILD_REPO: https://github.com/MiCode/kernel_build
+  MTK_MODULES_REPO: https://github.com/MiCode/MTK_kernel_modules
+  KERNEL_DIR: kernel_workspace
+  DEFCONFIG: spinel_defconfig
+  ARCH: arm64
+  CLANG_VERSION: r487747c   # adjust to whatever kernel_build/build.config pins
+
+jobs:
+  build:
+    name: Build ${{ inputs.kernel_name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 8192
+          swap-size-mb: 4096
+          remove-dotnet: true
+          remove-android: true
+          remove-haskell: true
+          remove-codeql: true
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison build-essential ccache curl flex \
+            g++-multilib gcc-multilib git gnupg gperf \
+            imagemagick lib32ncurses5-dev lib32readline-dev \
+            lib32z1-dev liblz4-tool libncurses5 libncurses5-dev \
+            libsdl1.2-dev libssl-dev libxml2 libxml2-utils \
+            lzop pngcrush rsync schedtool squashfs-tools \
+            xsltproc zip zlib1g-dev python3 python3-pip \
+            device-tree-compiler libc6-dev-i386
+
+      - name: Clone kernel source (${{ env.KERNEL_BRANCH }})
+        run: |
+          git clone --depth=1 -b $KERNEL_BRANCH $KERNEL_REPO $KERNEL_DIR
+
+      - name: Clone kernel_build (build scripts)
+        run: |
+          git clone --depth=1 -b $KERNEL_BRANCH $KERNEL_BUILD_REPO kernel_build
+
+      - name: Clone MTK external kernel modules
+        run: |
+          git clone --depth=1 -b $KERNEL_BRANCH $MTK_MODULES_REPO $KERNEL_DIR/mtk_modules
+
+      - name: Set up Clang toolchain
+        run: |
+          mkdir -p clang
+          # Pull the exact clang version pinned in kernel_build/build.config once you confirm it
+          curl -Ls "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/tags/${CLANG_VERSION}/clang-${CLANG_VERSION}.tar.gz" | tar -xz -C clang
+          echo "$(pwd)/clang/bin" >> $GITHUB_PATH
+
+      - name: Set up KernelSU-Next
+        if: ${{ inputs.ksu_variant == 'KernelSU-Next' }}
+        working-directory: ${{ env.KERNEL_DIR }}
+        run: |
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s next
+          echo "KSU_GIT_VERSION=$(cd KernelSU-Next && git rev-list --count HEAD)" >> $GITHUB_ENV
+
+      - name: Set up SukiSU-Ultra
+        if: ${{ inputs.ksu_variant == 'SukiSU-Ultra' }}
+        working-directory: ${{ env.KERNEL_DIR }}
+        run: |
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-main
+
+      - name: Apply SUSFS patches
+        if: ${{ inputs.susfs_enabled }}
+        working-directory: ${{ env.KERNEL_DIR }}
+        run: |
+          git clone --depth=1 -b kernel-5.10 https://gitlab.com/simonpunk/susfs4ksu.git susfs4ksu
+
+          cp susfs4ksu/kernel_patches/fs/* fs/ 2>/dev/null || true
+          cp susfs4ksu/kernel_patches/include/linux/* include/linux/ 2>/dev/null || true
+
+          patch -p1 < susfs4ksu/kernel_patches/50_add_susfs_in_kernel-5.10.patch || \
+            echo "::warning::susfs kernel patch had rejects — resolve manually before shipping"
+
+          if [ -d KernelSU-Next ]; then
+            cp susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch KernelSU-Next/ 2>/dev/null || true
+            (cd KernelSU-Next && patch -p1 < 10_enable_susfs_for_ksu.patch) || \
+              echo "::warning::susfs KSU patch had rejects — resolve manually before shipping"
+          fi
+
+      - name: Apply defconfig flags
+        working-directory: ${{ env.KERNEL_DIR }}
+        run: |
+          CFG=arch/${ARCH}/configs/${DEFCONFIG}
+          echo "CONFIG_KSU=y" >> $CFG
+          echo "CONFIG_KSU_SUSFS=${{ inputs.susfs_enabled && 'y' || 'n' }}" >> $CFG
+          echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> $CFG
+          echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> $CFG
+          echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> $CFG
+          echo "CONFIG_KSU_SUSFS_SUS_SU=n" >> $CFG
+          echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> $CFG
+          echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> $CFG
+          echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> $CFG
+          echo "CONFIG_LOCALVERSION=\"-${{ inputs.kernel_name }}\"" >> $CFG
+
+      - name: Build kernel
+        working-directory: ${{ env.KERNEL_DIR }}
+        run: |
+          export ARCH=${ARCH}
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export CC=clang
+
+          make O=out ${DEFCONFIG}
+          make O=out -j$(nproc --all) 2>&1 | tee build.log
+
+      - name: Package boot image
+        working-directory: ${{ env.KERNEL_DIR }}
+        run: |
+          mkdir -p ../VenomCore-out
+          IMG=$(find out -name "Image.gz-dtb" -o -name "Image.gz" -o -name "Image" | head -n1)
+          if [ -z "$IMG" ]; then
+            echo "::error::no kernel Image produced — check build.log"
+            exit 1
+          fi
+          cp "$IMG" ../VenomCore-out/Image
+
+      - name: Upload build log (always, for debugging)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: VenomCore-build-log
+          path: ${{ env.KERNEL_DIR }}/build.log
+
+      - name: Upload VenomCore kernel image
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.kernel_name }}-spinel-${{ github.run_number }}
+          path: VenomCore-out/Image
+          retention-days: 14
+
+      - name: Summary
+        run: |
+          echo "### 🐍 ${{ inputs.kernel_name }} build finished" >> $GITHUB_STEP_SUMMARY
+          echo "- Device: spinel (Redmi Note 15 4G)" >> $GITHUB_STEP_SUMMARY
+          echo "- Branch: $KERNEL_BRANCH" >> $GITHUB_STEP_SUMMARY
+          echo "- Root: ${{ inputs.ksu_variant }}" >> $GITHUB_STEP_SUMMARY
+          echo "- SUSFS: ${{ inputs.susfs_enabled }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Next step: magiskboot repack this Image into the Android 15 stock boot.img, fastboot boot it before flashing" >> $GITHUB_STEP_SUMMARY
