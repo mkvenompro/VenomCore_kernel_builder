@@ -547,6 +547,27 @@ jobs:
 
           echo 'CONFIG_LOCALVERSION="-${{ inputs.kernel_name }}"' >> "$CFG"
 
+          # --- pinctrl fix ---
+          # This tree ships the NEW MTK pinctrl driver stack (pinctrl-mt6789.c +
+          # pinctrl-mtk-common-v2.c, matching the pins[]/instances[]-based
+          # mtk-eint.h that's actually present here). The OLD generic
+          # CONFIG_PINCTRL_MTK driver (pinctrl-mtk-common.c) expects a
+          # different struct mtk_eint layout (fields: base/regs/hw) that
+          # doesn't exist in this mtk-eint.h, so it fails to build with
+          # "field has incomplete type 'struct mtk_eint_hw'". Force the
+          # correct device-specific driver instead.
+          sed -i \
+            -e '/^CONFIG_PINCTRL_MTK=/d' \
+            -e '/^CONFIG_PINCTRL_MT6789=/d' \
+            -e '/^CONFIG_PINCTRL_MTK_PARIS=/d' \
+            -e '/^CONFIG_PINCTRL_MTK_V2=/d' \
+            "$CFG"
+
+          echo "CONFIG_PINCTRL_MTK=n" >> "$CFG"
+          echo "CONFIG_PINCTRL_MT6789=y" >> "$CFG"
+          echo "CONFIG_PINCTRL_MTK_PARIS=y" >> "$CFG"
+          echo "CONFIG_PINCTRL_MTK_V2=y" >> "$CFG"
+
           echo
           tail -n30 "$CFG"
 
@@ -595,6 +616,7 @@ jobs:
           grep -E '^CONFIG_KSU=' out/.config || true
           grep -E '^CONFIG_KSU_SUSFS' out/.config || true
           grep -E '^CONFIG_LOCALVERSION=' out/.config || true
+          grep -E '^CONFIG_PINCTRL_MTK=|^CONFIG_PINCTRL_MT6789=|^CONFIG_PINCTRL_MTK_PARIS=' out/.config || true
 
           make \
             ARCH="${ARCH}" \
@@ -717,4 +739,12 @@ jobs:
             echo "- SUSFS: ${{ inputs.susfs_enabled }} (ref: ${{ inputs.susfs_ref }})"
             echo "- Defconfig: ${DEFCONFIG:-not resolved}"
             echo "- Kernel image: ${KERNEL_IMAGE:-not produced}"
+
+            if [ -f "${{ env.KERNEL_DIR }}/kernel-5.10/build.log" ]; then
+              echo ""
+              echo "### First compile errors found in build.log (if any)"
+              echo '```'
+              grep -i "error:" "${{ env.KERNEL_DIR }}/kernel-5.10/build.log" | head -n 20 || echo "(no 'error:' lines found)"
+              echo '```'
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
