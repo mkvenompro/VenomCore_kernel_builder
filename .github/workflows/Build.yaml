@@ -6,7 +6,7 @@ on:
       source_branch:
         description: "Branch containing the assembled kernel tree"
         required: true
-        default: "spinel-assembled"
+        default: "spinel-assembled-v2"
 
       ksu_variant:
         description: "Root solution (SukiSU-Ultra recommended with SUSFS)"
@@ -195,17 +195,25 @@ jobs:
             "$KERNEL_DIR"
 
           test -f "$KERNEL_DIR/VENOMCORE_ASSEMBLY.md"
-          test -f "$KERNEL_DIR/Makefile"
-          test -d "$KERNEL_DIR/arch/arm64/configs"
+          test -d "$KERNEL_DIR/kernel-5.10"
+          test -f "$KERNEL_DIR/kernel-5.10/Makefile"
+          test -d "$KERNEL_DIR/kernel-5.10/arch/arm64/configs"
 
-          make -C "$KERNEL_DIR" kernelversion
+          echo "--- checking sibling vendor/mediatek/kernel_modules/ ---"
+          if [ -d "$KERNEL_DIR/vendor/mediatek/kernel_modules" ]; then
+            ls "$KERNEL_DIR/vendor/mediatek/kernel_modules"
+          else
+            echo "::warning::vendor/mediatek/kernel_modules not found next to kernel-5.10 — modules will not be picked up"
+          fi
+
+          make -C "$KERNEL_DIR/kernel-5.10" kernelversion
 
       # ============================================================
       # INSPECT TREE
       # ============================================================
 
       - name: Inspect assembled tree
-        working-directory: ${{ env.KERNEL_DIR }}
+        working-directory: ${{ env.KERNEL_DIR }}/kernel-5.10
         run: |
           set -e
 
@@ -236,7 +244,7 @@ jobs:
       # ============================================================
 
       - name: Locate defconfig
-        working-directory: ${{ env.KERNEL_DIR }}
+        working-directory: ${{ env.KERNEL_DIR }}/kernel-5.10
         run: |
           set -e
 
@@ -330,7 +338,7 @@ jobs:
 
       - name: Set up KernelSU-Next
         if: ${{ inputs.ksu_variant == 'KernelSU-Next' }}
-        working-directory: ${{ env.KERNEL_DIR }}
+        working-directory: ${{ env.KERNEL_DIR }}/kernel-5.10
         run: |
           set -e
 
@@ -355,7 +363,7 @@ jobs:
 
       - name: Set up SukiSU-Ultra
         if: ${{ inputs.ksu_variant == 'SukiSU-Ultra' }}
-        working-directory: ${{ env.KERNEL_DIR }}
+        working-directory: ${{ env.KERNEL_DIR }}/kernel-5.10
         run: |
           set -e
 
@@ -382,7 +390,7 @@ jobs:
 
       - name: Apply SUSFS
         if: ${{ inputs.susfs_enabled }}
-        working-directory: ${{ env.KERNEL_DIR }}
+        working-directory: ${{ env.KERNEL_DIR }}/kernel-5.10
         run: |
           set -e
 
@@ -451,24 +459,35 @@ jobs:
           SUSFS_KSU_PATCH="susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
           test -f "$SUSFS_KSU_PATCH"
 
+          KSU_TARGET_DIR=""
+          if [ -d KernelSU-Next ]; then
+            KSU_TARGET_DIR="KernelSU-Next"
+          elif [ -d KernelSU ]; then
+            KSU_TARGET_DIR="KernelSU"
+          fi
+
           if [ "${{ inputs.ksu_variant }}" = "SukiSU-Ultra" ]; then
 
             echo
             echo "SukiSU-Ultra already ships integrated SUSFS support."
             echo "Skipping the KernelSU-side SUSFS patch on purpose."
 
-          elif [ -d KernelSU-Next ]; then
-
-            apply_patch_or_fail "$SUSFS_KSU_PATCH" "KernelSU-Next"
-
-          elif [ -d KernelSU ]; then
-
-            apply_patch_or_fail "$SUSFS_KSU_PATCH" "KernelSU"
-
-          else
+          elif [ -z "$KSU_TARGET_DIR" ]; then
 
             echo "::error::KernelSU source directory not found."
             exit 1
+
+          elif grep -rq "KSU_SUSFS" "$KSU_TARGET_DIR/kernel/Kconfig" 2>/dev/null \
+            || grep -rq "KSU_SUSFS" "$KSU_TARGET_DIR/Kconfig" 2>/dev/null; then
+
+            echo
+            echo "$KSU_TARGET_DIR already has SUSFS Kconfig options built in"
+            echo "(this KernelSU-Next ref ships its own susfs integration)."
+            echo "Skipping the susfs4ksu patch here to avoid a duplicate-hunk conflict."
+
+          else
+
+            apply_patch_or_fail "$SUSFS_KSU_PATCH" "$KSU_TARGET_DIR"
 
           fi
 
@@ -480,7 +499,7 @@ jobs:
       # ============================================================
 
       - name: Apply VenomCore configuration
-        working-directory: ${{ env.KERNEL_DIR }}
+        working-directory: ${{ env.KERNEL_DIR }}/kernel-5.10
         run: |
           set -e
 
@@ -542,7 +561,7 @@ jobs:
       # working combo for older (5.10-era) Android kernels.
 
       - name: Build kernel
-        working-directory: ${{ env.KERNEL_DIR }}
+        working-directory: ${{ env.KERNEL_DIR }}/kernel-5.10
         run: |
           set -o pipefail
 
@@ -622,7 +641,7 @@ jobs:
 
       - name: Package artifacts
         if: success()
-        working-directory: ${{ env.KERNEL_DIR }}
+        working-directory: ${{ env.KERNEL_DIR }}/kernel-5.10
         run: |
           set -e
 
@@ -657,7 +676,7 @@ jobs:
           name: "${{ inputs.kernel_name }}-spinel-run${{ github.run_number }}"
           path: |
             release/
-            kernel_workspace/build.log
+            kernel_workspace/kernel-5.10/build.log
           if-no-files-found: warn
           retention-days: 7
 
