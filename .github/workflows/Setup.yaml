@@ -131,6 +131,7 @@ jobs:
         working-directory: ${{ env.WORKDIR }}
         run: |
           set -e
+          rm -rf .git   # drop the .git from the original MiCode clone so this becomes a fresh, independent repo
           git init -q
           git config user.name "VenomCore Assembler Bot"
           git config user.email "actions@github.com"
@@ -144,6 +145,7 @@ jobs:
         working-directory: ${{ env.WORKDIR }}
         run: |
           set -e
+          git remote remove origin 2>/dev/null || true
           git remote add origin "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
           echo "Pushing to branch ${{ inputs.target_branch }} ..."
           if ! git push --force origin "${{ inputs.target_branch }}" 2>push_error.log; then
