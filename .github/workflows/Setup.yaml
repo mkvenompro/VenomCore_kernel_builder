@@ -1,14 +1,15 @@
-name: 🧩 VenomCore Tree Assembler (spinel)
+name: 🧩 VenomCore Tree Assembler v2 (spinel)
 
-# Merges the raw MiCode sources into ONE proper kernel tree and pushes it
-# to a branch in THIS repo, so the build workflow has something sane to build from.
+# Correct layout, based on the actual MTK Makefile wiring:
+#   drivers/misc/mediatek/connectivity/Makefile (already inside Xiaomi_Kernel_OpenSource)
+#   expects a SIBLING directory one level above the kernel source root:
+#     $(srctree)/../vendor/mediatek/kernel_modules/connectivity/...
 #
-# Sources merged:
-#   - MiCode/Xiaomi_Kernel_OpenSource (spinel-v-oss)   -> base kernel tree
-#   - MiCode/MTK_kernel_modules       (spinel-v-oss)   -> merged into the tree
-#   - MiCode/kernel_build             (spinel-v-oss)   -> kept as kernel_build/ for reference
+# So the pushed tree layout is:
+#   kernel-5.10/                              <- Xiaomi_Kernel_OpenSource (matches KERNEL_DIR in build.config)
+#   vendor/mediatek/kernel_modules/<name>/     <- each top-level folder from MTK_kernel_modules
+#   kernel_build/                              <- kept for reference
 #
-# Result is pushed (squashed, single commit) to: spinel-assembled
 # Maintainer: MkVenomPro
 
 on:
@@ -17,7 +18,7 @@ on:
       target_branch:
         description: "Branch in THIS repo to push the assembled tree to"
         required: true
-        default: "spinel-assembled"
+        default: "spinel-assembled-v2"
 
 permissions:
   contents: write
@@ -31,7 +32,7 @@ env:
 
 jobs:
   assemble:
-    name: Assemble spinel tree
+    name: Assemble spinel tree (v2 layout)
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
@@ -45,37 +46,51 @@ jobs:
           remove-haskell: true
           remove-codeql: true
 
-      - name: Clone base kernel tree (Xiaomi_Kernel_OpenSource, ${{ env.KERNEL_BRANCH }})
+      - name: Create workspace layout
         run: |
           set -e
-          git clone --depth=1 -b "$KERNEL_BRANCH" "$KERNEL_REPO" "$WORKDIR"
-          echo "--- top-level of base tree ---"
-          ls "$WORKDIR"
+          mkdir -p "$WORKDIR"
 
-      - name: Clone MTK kernel modules (${{ env.KERNEL_BRANCH }})
+      - name: Clone kernel source into kernel-5.10/
+        run: |
+          set -e
+          git clone --depth=1 -b "$KERNEL_BRANCH" "$KERNEL_REPO" "$WORKDIR/kernel-5.10"
+          rm -rf "$WORKDIR/kernel-5.10/.git"
+          echo "--- kernel-5.10/ top-level ---"
+          ls "$WORKDIR/kernel-5.10"
+
+      - name: Confirm the connectivity glue Makefile exists in-tree
+        run: |
+          set -e
+          GLUE="$WORKDIR/kernel-5.10/drivers/misc/mediatek/connectivity/Makefile"
+          if [ -f "$GLUE" ]; then
+            echo "Found glue Makefile: $GLUE"
+            echo "--- relevant PATH_TO_* lines ---"
+            grep -n "PATH_TO_" "$GLUE" || true
+          else
+            echo "::warning::no drivers/misc/mediatek/connectivity/Makefile found — the sibling-symlink trick below may not trigger. Inspect drivers/misc/mediatek/ manually."
+            find "$WORKDIR/kernel-5.10/drivers/misc/mediatek" -maxdepth 2 2>/dev/null || echo "drivers/misc/mediatek not found either"
+          fi
+
+      - name: Clone MTK kernel modules
         run: |
           set -e
           git clone --depth=1 -b "$KERNEL_BRANCH" "$MTK_MODULES_REPO" mtk_modules_src
           echo "--- top-level of MTK modules ---"
           ls mtk_modules_src
 
-      - name: Merge MTK modules into the tree
+      - name: Place modules as sibling: vendor/mediatek/kernel_modules/
         run: |
           set -e
-          # Known merge points from similar MT68xx/MT69xx trees:
-          #   drivers/misc/mediatek/  and  drivers/gpu/mediatek/
-          # We overlay anything matching that shape, and ALSO keep a raw copy
-          # under vendor/mtk_modules/ so nothing is silently dropped if the
-          # folder layout in this particular dump doesn't match 1:1.
-          mkdir -p "$WORKDIR/vendor/mtk_modules_raw"
-          rsync -a mtk_modules_src/ "$WORKDIR/vendor/mtk_modules_raw/" --exclude=".git"
-
-          if [ -d "mtk_modules_src/drivers" ]; then
-            echo "Found drivers/ in MTK modules — merging directly into tree drivers/"
-            rsync -a mtk_modules_src/drivers/ "$WORKDIR/drivers/"
-          fi
-
-          echo "::notice::Raw MTK modules also preserved under vendor/mtk_modules_raw/ — inspect it and adjust merge paths in this step if it doesn't match drivers/misc/mediatek or drivers/gpu/mediatek."
+          DEST="$WORKDIR/vendor/mediatek/kernel_modules"
+          mkdir -p "$DEST"
+          for d in mtk_modules_src/*/; do
+            name=$(basename "$d")
+            echo "Placing $name -> $DEST/$name"
+            rsync -a "$d" "$DEST/$name/" --exclude=".git"
+          done
+          echo "--- resulting vendor/mediatek/kernel_modules/ ---"
+          ls "$DEST"
 
       - name: Clone kernel_build (kept for reference, not merged into source)
         run: |
@@ -86,24 +101,28 @@ jobs:
       - name: Write assembly notes into the tree
         run: |
           cat > "$WORKDIR/VENOMCORE_ASSEMBLY.md" << 'EOF'
-          # VenomCore assembled tree — spinel
+          # VenomCore assembled tree v2 — spinel
 
-          Assembled automatically by the "VenomCore Tree Assembler" workflow.
+          Layout (matches the real MTK build wiring, not a guess this time):
 
-          Sources merged (all branch: spinel-v-oss):
-          - MiCode/Xiaomi_Kernel_OpenSource -> base tree (this repo root)
-          - MiCode/MTK_kernel_modules       -> merged into drivers/ where possible,
-                                               full raw copy kept in vendor/mtk_modules_raw/
-          - MiCode/kernel_build             -> kept under kernel_build/ (build scripts, unmerged)
+          ```
+          kernel-5.10/                              <- Xiaomi_Kernel_OpenSource @ spinel-v-oss
+          vendor/mediatek/kernel_modules/<name>/     <- each top-level dir from MTK_kernel_modules
+          kernel_build/                              <- AOSP kernel/build scripts, reference only
+          ```
+
+          This mirrors: drivers/misc/mediatek/connectivity/Makefile inside kernel-5.10
+          expects `$(srctree)/../vendor/mediatek/kernel_modules/connectivity/...` to exist
+          as a SIBLING directory, and symlinks it in automatically when found — building
+          WLAN/BT/connfem/etc IN-TREE as part of the normal kernel build, no separate
+          out-of-tree module build step needed.
 
           Base tag: alps-mp-s0.mp1.tc8sp2-cs1-xm.V1.143.1
 
-          ⚠️ This is a MECHANICAL merge (rsync overlay), not a verified working
-          kernel tree. The MTK modules merge path is a best guess based on a
-          similar MT6789 device (yunluo) — check vendor/mtk_modules_raw/ and
-          confirm the real drivers/ layout before trusting a build from this.
-
-          Regenerate this branch any time by re-running the assembler workflow.
+          Still to verify once you build: whether a defconfig flag like
+          CONFIG_WLAN_DRV_BUILD_IN=y (or similar) needs to be turned on for the
+          glue Makefile to actually pick the modules up — check the glue Makefile's
+          PATH_TO_* / CONFIG_* guards printed by the assembler workflow's log.
           EOF
 
       - name: Check for files over GitHub's 100MB push limit
@@ -112,7 +131,7 @@ jobs:
           set -e
           BIG=$(find . -type f -size +95M -not -path "./.git/*" || true)
           if [ -n "$BIG" ]; then
-            echo "::warning::files over ~95MB found — GitHub rejects pushes with files >100MB without Git LFS. Excluding them from the commit so the push doesn't fail:"
+            echo "::warning::files over ~95MB found — excluding them so the push doesn't fail:"
             echo "$BIG"
             echo "$BIG" | sed 's|^\./||' > /tmp/big_files.txt
             while IFS= read -r f; do
@@ -131,13 +150,13 @@ jobs:
         working-directory: ${{ env.WORKDIR }}
         run: |
           set -e
-          rm -rf .git   # drop the .git from the original MiCode clone so this becomes a fresh, independent repo
+          rm -rf .git
           git init -q
           git config user.name "VenomCore Assembler Bot"
           git config user.email "actions@github.com"
           git checkout -q -b "${{ inputs.target_branch }}"
           git add -A
-          git commit -q -m "VenomCore: assemble spinel tree ($(date -u +%Y-%m-%d))"
+          git commit -q -m "VenomCore: assemble spinel tree v2 ($(date -u +%Y-%m-%d))"
           echo "Commit created. Object count:"
           git count-objects -v
 
@@ -159,8 +178,8 @@ jobs:
 
       - name: Summary
         run: |
-          echo "### 🧩 spinel tree assembled" >> $GITHUB_STEP_SUMMARY
+          echo "### 🧩 spinel tree v2 assembled" >> $GITHUB_STEP_SUMMARY
           echo "- Pushed to branch: \`${{ inputs.target_branch }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- Base: Xiaomi_Kernel_OpenSource @ $KERNEL_BRANCH" >> $GITHUB_STEP_SUMMARY
-          echo "- MTK modules merged into drivers/ (best-effort) + raw copy in vendor/mtk_modules_raw/" >> $GITHUB_STEP_SUMMARY
-          echo "- ⚠️ Review VENOMCORE_ASSEMBLY.md in that branch before building from it" >> $GITHUB_STEP_SUMMARY
+          echo "- kernel-5.10/ = Xiaomi_Kernel_OpenSource @ $KERNEL_BRANCH" >> $GITHUB_STEP_SUMMARY
+          echo "- vendor/mediatek/kernel_modules/ = MTK_kernel_modules, placed as sibling (real layout)" >> $GITHUB_STEP_SUMMARY
+          echo "- ⚠️ Review VENOMCORE_ASSEMBLY.md — check the glue Makefile log in the 'Confirm the connectivity glue Makefile' step" >> $GITHUB_STEP_SUMMARY
