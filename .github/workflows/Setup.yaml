@@ -106,19 +106,54 @@ jobs:
           Regenerate this branch any time by re-running the assembler workflow.
           EOF
 
-      - name: Commit and push assembled tree
+      - name: Check for files over GitHub's 100MB push limit
         working-directory: ${{ env.WORKDIR }}
         run: |
           set -e
-          git init
+          BIG=$(find . -type f -size +95M -not -path "./.git/*" || true)
+          if [ -n "$BIG" ]; then
+            echo "::warning::files over ~95MB found — GitHub rejects pushes with files >100MB without Git LFS. Excluding them from the commit so the push doesn't fail:"
+            echo "$BIG"
+            echo "$BIG" | sed 's|^\./||' > /tmp/big_files.txt
+            while IFS= read -r f; do
+              [ -n "$f" ] && rm -f "$f" && echo "removed: $f"
+            done < /tmp/big_files.txt
+            {
+              echo ""
+              echo "## Files excluded (over 100MB, need Git LFS if you want them)"
+              cat /tmp/big_files.txt
+            } >> VENOMCORE_ASSEMBLY.md
+          else
+            echo "No files over 95MB — good."
+          fi
+
+      - name: Commit assembled tree
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          set -e
+          git init -q
           git config user.name "VenomCore Assembler Bot"
           git config user.email "actions@github.com"
-          git checkout -b "${{ inputs.target_branch }}"
+          git checkout -q -b "${{ inputs.target_branch }}"
           git add -A
-          git commit -m "VenomCore: assemble spinel tree ($(date -u +%Y-%m-%d))"
+          git commit -q -m "VenomCore: assemble spinel tree ($(date -u +%Y-%m-%d))"
+          echo "Commit created. Object count:"
+          git count-objects -v
 
+      - name: Push assembled tree to this repo
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          set -e
           git remote add origin "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
-          git push --force origin "${{ inputs.target_branch }}"
+          echo "Pushing to branch ${{ inputs.target_branch }} ..."
+          if ! git push --force origin "${{ inputs.target_branch }}" 2>push_error.log; then
+            echo "::error::push failed — printing the raw git error below"
+            cat push_error.log
+            echo ""
+            echo "::error::most likely cause: repo Settings → Actions → General → Workflow permissions is set to 'Read repository contents permission (read only)'. Switch it to 'Read and write permissions' and re-run this workflow."
+            exit 1
+          fi
+          echo "Push succeeded."
 
       - name: Summary
         run: |
