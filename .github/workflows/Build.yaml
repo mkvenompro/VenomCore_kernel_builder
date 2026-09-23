@@ -1,14 +1,36 @@
 name: 🐍 VenomCore Kernel Builder (spinel)
 
-# Builds from the ASSEMBLED tree (produced by the "VenomCore Tree Assembler"
-# workflow) instead of raw MiCode sources. Run the assembler first at least once.
-# Maintainer: MkVenomPro
+# VenomCore kernel builder for Redmi Note 15 4G (spinel)
+#
+# Source:
+#   mkvenompro/VenomCore_kernel_builder
+#   branch: spinel-assembled
+#
+# Target:
+#   Redmi Note 15 4G (spinel)
+#   Android 15 / HyperOS 2
+#   Linux 5.10
+#
+# Root options:
+#   KernelSU-Next
+#   SukiSU-Ultra
+#
+# Optional:
+#   SUSFS
+#
+# Output:
+#   Raw kernel Image
+#   AnyKernel3 flashable ZIP
+#
+# Maintainer:
+#   MkVenomPro
 
 on:
   workflow_dispatch:
     inputs:
+
       source_branch:
-        description: "Branch in THIS repo holding the assembled tree"
+        description: "Branch in this repository containing the assembled kernel tree"
         required: true
         default: "spinel-assembled"
 
@@ -28,28 +50,37 @@ on:
         type: boolean
 
       kernel_name:
-        description: "Kernel build name (shown in kernel version string)"
+        description: "Kernel build name"
         required: true
         default: "VenomCore"
+
 
 env:
   KERNEL_DIR: kernel_workspace
   ARCH: arm64
 
+
 jobs:
+
   build:
-    name: Build ${{ inputs.kernel_name }}
+
+    name: Build VenomCore
+
     runs-on: ubuntu-latest
+
     timeout-minutes: 180
+
 
     steps:
 
       # ============================================================
-      # BUILD SPACE
+      # MAXIMIZE BUILD SPACE
       # ============================================================
 
       - name: Maximize build space
+
         uses: easimon/maximize-build-space@master
+
         with:
           root-reserve-mb: 8192
           swap-size-mb: 4096
@@ -58,12 +89,15 @@ jobs:
           remove-haskell: true
           remove-codeql: true
 
+
       # ============================================================
-      # DEPENDENCIES
+      # INSTALL DEPENDENCIES
       # ============================================================
 
       - name: Install dependencies
+
         run: |
+
           set -e
 
           sudo apt-get update
@@ -77,7 +111,6 @@ jobs:
             flex \
             g++-multilib \
             gcc-multilib \
-            gcc-aarch64-linux-gnu \
             binutils-aarch64-linux-gnu \
             git \
             gnupg \
@@ -86,6 +119,7 @@ jobs:
             lib32ncurses-dev \
             lib32readline-dev \
             lib32z1-dev \
+            libelf-dev \
             liblz4-tool \
             libncurses-dev \
             libsdl1.2-dev \
@@ -93,6 +127,7 @@ jobs:
             libxml2 \
             libxml2-utils \
             lzop \
+            pahole \
             pngcrush \
             rsync \
             schedtool \
@@ -105,62 +140,210 @@ jobs:
             device-tree-compiler \
             libc6-dev-i386
 
+
       # ============================================================
-      # CLONE ASSEMBLED TREE
+      # VERIFY TOOLCHAIN DEPENDENCIES
       # ============================================================
 
-      - name: Clone assembled tree from ${{ inputs.source_branch }} (this repo)
+      - name: Verify host tools
+
         run: |
+
           set -e
 
-          git clone --depth=1 -b "${{ inputs.source_branch }}" \
-            "https://github.com/${{ github.repository }}.git" "$KERNEL_DIR"
+          echo "=========================================="
+          echo " Host tool verification"
+          echo "=========================================="
 
-          echo "--- assembled tree top-level ---"
-          ls "$KERNEL_DIR"
+          echo
+          echo "make:"
+          make --version | head -n1
+
+          echo
+          echo "python:"
+          python3 --version
+
+          echo
+          echo "git:"
+          git --version
+
+          echo
+          echo "bc:"
+          bc --version | head -n1
+
+          echo
+          echo "dtc:"
+          dtc --version
+
+          echo
+          echo "AArch64 binutils:"
+          which aarch64-linux-gnu-ld
+          which aarch64-linux-gnu-as
+          which aarch64-linux-gnu-objcopy
+          which aarch64-linux-gnu-strip
+
+          echo
+          aarch64-linux-gnu-ld --version | head -n1
+
+
+      # ============================================================
+      # CLONE ASSEMBLED KERNEL TREE
+      # ============================================================
+
+      - name: Clone assembled tree
+
+        run: |
+
+          set -e
+
+          echo "=========================================="
+          echo " Cloning VenomCore assembled kernel tree"
+          echo "=========================================="
+
+          git clone \
+            --depth=1 \
+            -b "${{ inputs.source_branch }}" \
+            "https://github.com/${{ github.repository }}.git" \
+            "$KERNEL_DIR"
+
+          echo
+          echo "--- repository root ---"
+
+          ls -lah "$KERNEL_DIR"
+
+          echo
+          echo "--- assembly marker ---"
 
           if [ ! -f "$KERNEL_DIR/VENOMCORE_ASSEMBLY.md" ]; then
-            echo "::error::this doesn't look like an assembled tree (no VENOMCORE_ASSEMBLY.md) — run the assembler workflow first"
+
+            echo "::error::VENOMCORE_ASSEMBLY.md not found."
+
+            echo
+            echo "This branch does not appear to be an assembled VenomCore tree."
+
             exit 1
+
           fi
+
+          echo "VENOMCORE_ASSEMBLY.md found."
+
+          echo
+          echo "--- Makefile ---"
 
           if [ ! -f "$KERNEL_DIR/Makefile" ]; then
-            echo "::error::kernel Makefile not found"
+
+            echo "::error::Kernel Makefile not found."
+
             exit 1
+
           fi
 
-          if [ ! -d "$KERNEL_DIR/arch/${ARCH}/configs" ]; then
-            echo "::error::arch/${ARCH}/configs not found"
+          echo "Kernel Makefile found."
+
+          echo
+          echo "--- ARM64 config directory ---"
+
+          if [ ! -d "$KERNEL_DIR/arch/arm64/configs" ]; then
+
+            echo "::error::arch/arm64/configs does not exist."
+
             exit 1
+
           fi
+
+          ls -lah "$KERNEL_DIR/arch/arm64/configs"
 
           echo
           echo "--- kernel version ---"
+
           make -C "$KERNEL_DIR" kernelversion
+
+
+      # ============================================================
+      # SHOW TREE INFORMATION
+      # ============================================================
+
+      - name: Inspect assembled tree
+
+        working-directory: ${{ env.KERNEL_DIR }}
+
+        run: |
+
+          set -e
+
+          echo "=========================================="
+          echo " VenomCore assembled tree inspection"
+          echo "=========================================="
+
+          echo
+          echo "--- Git commit ---"
+
+          git log -1 --oneline
+
+          echo
+          echo "--- Kernel version ---"
+
+          make kernelversion
+
+          echo
+          echo "--- ARM64 configs ---"
+
+          find arch/arm64/configs \
+            -maxdepth 1 \
+            -type f \
+            -printf "%f\n" \
+            | sort
+
+          echo
+          echo "--- MTK directories ---"
+
+          if [ -d drivers/misc/mediatek ]; then
+            echo "drivers/misc/mediatek: FOUND"
+          else
+            echo "drivers/misc/mediatek: NOT FOUND"
+          fi
+
+          if [ -d vendor/mtk_modules_raw ]; then
+            echo "vendor/mtk_modules_raw: FOUND"
+            find vendor/mtk_modules_raw \
+              -maxdepth 2 \
+              -type d \
+              | head -n50
+          else
+            echo "vendor/mtk_modules_raw: NOT FOUND"
+          fi
+
 
       # ============================================================
       # LOCATE DEFCONFIG
       # ============================================================
 
       - name: Locate defconfig
+
         working-directory: ${{ env.KERNEL_DIR }}
+
         run: |
+
           set -e
 
           CONFIG_DIR="arch/${ARCH}/configs"
 
           echo "=========================================="
-          echo " Locating Spinel defconfig"
+          echo " Locating kernel defconfig"
           echo "=========================================="
-          echo
 
-          echo "--- available configs ---"
+          echo
+          echo "--- Available configs ---"
 
           ls -lah "$CONFIG_DIR"
 
           echo
 
-          # First try a Spinel-specific defconfig.
+          # --------------------------------------------------------
+          # First priority:
+          # Spinel-specific config
+          # --------------------------------------------------------
+
           FOUND=$(find "$CONFIG_DIR" \
             -maxdepth 1 \
             -type f \
@@ -172,7 +355,7 @@ jobs:
 
             DEFCONFIG_NAME=$(basename "$FOUND")
 
-            echo "Found Spinel-specific defconfig:"
+            echo "Spinel-specific defconfig found:"
             echo "$DEFCONFIG_NAME"
 
             echo "DEFCONFIG=$DEFCONFIG_NAME" >> "$GITHUB_ENV"
@@ -181,16 +364,16 @@ jobs:
 
           fi
 
-          # The assembled tree currently contains:
-          #
-          #   arch/arm64/configs/defconfig
-          #
-          # so don't fail just because the filename does not contain
-          # "spinel".
+
+          # --------------------------------------------------------
+          # Second priority:
+          # Existing generic ARM64 defconfig
+          # --------------------------------------------------------
+
           if [ -f "$CONFIG_DIR/defconfig" ]; then
 
-            echo "::warning::no defconfig matching *spinel* found."
-            echo "::notice::using existing ARM64 defconfig: defconfig"
+            echo "::notice::No Spinel-specific defconfig found."
+            echo "::notice::Using arch/arm64/configs/defconfig"
 
             echo "DEFCONFIG=defconfig" >> "$GITHUB_ENV"
 
@@ -198,11 +381,15 @@ jobs:
 
           fi
 
-          # Last fallback.
+
+          # --------------------------------------------------------
+          # Third priority:
+          # GKI defconfig
+          # --------------------------------------------------------
+
           if [ -f "$CONFIG_DIR/gki_defconfig" ]; then
 
-            echo "::warning::no Spinel-specific defconfig or generic defconfig found."
-            echo "::notice::using gki_defconfig"
+            echo "::notice::Using arch/arm64/configs/gki_defconfig"
 
             echo "DEFCONFIG=gki_defconfig" >> "$GITHUB_ENV"
 
@@ -210,124 +397,242 @@ jobs:
 
           fi
 
-          echo "::error::no usable defconfig found under $CONFIG_DIR"
+
+          echo "::error::No usable defconfig found."
 
           exit 1
 
+
       # ============================================================
-      # SET UP CLANG TOOLCHAIN
+      # SETUP ANDROID CLANG
       # ============================================================
 
-      - name: Set up Clang toolchain
+      - name: Set up Android Clang
+
         run: |
+
           set -e
 
-          mkdir -p clang
+          echo "=========================================="
+          echo " Setting up Android Clang"
+          echo "=========================================="
 
-          git clone --depth=1 -b master-kernel-build-2021 \
+          rm -rf clang
+
+          git clone \
+            --depth=1 \
+            -b master-kernel-build-2021 \
             https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
             clang
 
+          echo
+          echo "--- Searching for clang ---"
+
           CLANG_BIN_DIR=$(find clang \
-            -maxdepth 2 \
-            -type d \
-            -name 'bin' \
+            -type f \
+            -name clang \
+            -printf '%h\n' \
             | head -n1)
 
           if [ -z "$CLANG_BIN_DIR" ]; then
-            echo "::error::Clang bin directory not found"
+
+            echo "::error::Android Clang executable not found."
+
+            find clang \
+              -maxdepth 4 \
+              -type f \
+              -name clang \
+              -print
+
+            exit 1
+
+          fi
+
+          echo "Clang bin directory:"
+          echo "$CLANG_BIN_DIR"
+
+          echo "$CLANG_BIN_DIR" >> "$GITHUB_PATH"
+
+          echo
+          echo "--- LLVM tools ---"
+
+          if [ -x "$CLANG_BIN_DIR/clang" ]; then
+            echo "clang: FOUND"
+          else
+            echo "::error::clang executable missing"
             exit 1
           fi
 
-          echo "$CLANG_BIN_DIR" >> $GITHUB_PATH
+          if [ -x "$CLANG_BIN_DIR/clang++" ]; then
+            echo "clang++: FOUND"
+          fi
 
-          echo "Clang resolved at: $CLANG_BIN_DIR"
+          if [ -x "$CLANG_BIN_DIR/ld.lld" ]; then
+            echo "ld.lld: FOUND"
+          else
+            echo "::warning::ld.lld not found in clang directory"
+          fi
+
+          if [ -x "$CLANG_BIN_DIR/llvm-ar" ]; then
+            echo "llvm-ar: FOUND"
+          fi
+
+          if [ -x "$CLANG_BIN_DIR/llvm-nm" ]; then
+            echo "llvm-nm: FOUND"
+          fi
+
+          if [ -x "$CLANG_BIN_DIR/llvm-objcopy" ]; then
+            echo "llvm-objcopy: FOUND"
+          fi
+
 
       # ============================================================
       # VERIFY CLANG
       # ============================================================
 
-      - name: Verify clang is on PATH
+      - name: Verify Clang
+
         run: |
+
           set -e
 
-          which clang || (
-            echo "::error::clang not found on PATH after toolchain step"
-            exit 1
-          )
+          echo "=========================================="
+          echo " Clang verification"
+          echo "=========================================="
 
+          which clang
+
+          echo
           clang --version
 
-      # ============================================================
-      # VERIFY AARCH64 TOOLCHAIN
-      # ============================================================
-
-      - name: Verify AArch64 cross compiler
-        run: |
-          set -e
-
-          echo "AArch64 GCC:"
-          which aarch64-linux-gnu-gcc
+          echo
+          echo "clang++:"
+          which clang++ || true
 
           echo
-          aarch64-linux-gnu-gcc --version | head -n1
+          echo "ld.lld:"
+          which ld.lld || true
 
           echo
-          echo "AArch64 binutils:"
-          which aarch64-linux-gnu-ld
+          echo "llvm-ar:"
+          which llvm-ar || true
 
           echo
-          aarch64-linux-gnu-ld --version | head -n1
+          echo "llvm-nm:"
+          which llvm-nm || true
+
+          echo
+          echo "llvm-objcopy:"
+          which llvm-objcopy || true
+
 
       # ============================================================
       # KERNELSU-NEXT
       # ============================================================
 
       - name: Set up KernelSU-Next
+
         if: ${{ inputs.ksu_variant == 'KernelSU-Next' }}
+
         working-directory: ${{ env.KERNEL_DIR }}
+
         run: |
+
           set -e
+
+          echo "=========================================="
+          echo " Setting up KernelSU-Next"
+          echo "=========================================="
 
           curl -LSs \
             "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
             | bash -s next
 
-          echo "KSU_GIT_VERSION=$(cd KernelSU-Next && git rev-list --count HEAD)" >> $GITHUB_ENV
+          echo
+          echo "--- KernelSU-Next status ---"
+
+          if [ ! -d KernelSU-Next ]; then
+
+            echo "::error::KernelSU-Next directory was not created."
+
+            exit 1
+
+          fi
+
+          echo "KernelSU-Next directory:"
+          ls -lah KernelSU-Next
+
+          echo
+          echo "--- KernelSU-Next commit ---"
+
+          git -C KernelSU-Next log -1 --oneline
+
+          KSU_GIT_VERSION=$(git -C KernelSU-Next rev-list --count HEAD)
+
+          echo "KSU_GIT_VERSION=$KSU_GIT_VERSION" >> "$GITHUB_ENV"
+
 
       # ============================================================
       # SUKISU-ULTRA
       # ============================================================
 
       - name: Set up SukiSU-Ultra
+
         if: ${{ inputs.ksu_variant == 'SukiSU-Ultra' }}
+
         working-directory: ${{ env.KERNEL_DIR }}
+
         run: |
+
           set -e
+
+          echo "=========================================="
+          echo " Setting up SukiSU-Ultra"
+          echo "=========================================="
 
           curl -LSs \
             "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" \
             | bash -s susfs-main
 
+          echo
+          echo "--- SukiSU-Ultra status ---"
+
+          if [ ! -d KernelSU-Next ] && [ ! -d KernelSU ]; then
+
+            echo "::error::SukiSU setup did not create a KernelSU source directory."
+
+            exit 1
+
+          fi
+
+          echo "SukiSU setup completed."
+
+
       # ============================================================
       # SUSFS
       # ============================================================
 
-      - name: Apply SUSFS patches
+      - name: Apply SUSFS
+
         if: ${{ inputs.susfs_enabled }}
+
         working-directory: ${{ env.KERNEL_DIR }}
+
         run: |
+
           set -e
 
           echo "=========================================="
-          echo " Applying SUSFS for Android 12 / 5.10"
+          echo " SUSFS"
+          echo " Android 12 / Linux 5.10"
           echo "=========================================="
 
           rm -rf susfs4ksu
 
-          # IMPORTANT:
-          # The old "kernel-5.10" branch no longer exists.
-          # Current compatible branch is gki-android12-5.10.
+          echo
+          echo "Cloning SUSFS branch:"
+          echo "gki-android12-5.10"
+
           git clone \
             --depth=1 \
             -b gki-android12-5.10 \
@@ -335,170 +640,418 @@ jobs:
             susfs4ksu
 
           echo
-          echo "--- SUSFS revision ---"
+          echo "--- SUSFS commit ---"
 
           git -C susfs4ksu log -1 --oneline
 
-          # --------------------------------------------------------
-          # Copy SUSFS kernel files
-          # --------------------------------------------------------
+          echo
+          echo "--- SUSFS tree ---"
 
-          cp \
-            susfs4ksu/kernel_patches/fs/* \
-            fs/ \
-            2>/dev/null || true
+          find susfs4ksu/kernel_patches \
+            -maxdepth 2 \
+            -type f \
+            | sort
 
-          cp \
-            susfs4ksu/kernel_patches/include/linux/* \
-            include/linux/ \
-            2>/dev/null || true
 
           # --------------------------------------------------------
-          # Apply kernel SUSFS patch
+          # Copy SUSFS filesystem changes
+          # --------------------------------------------------------
+
+          echo
+          echo "--- Copying SUSFS fs files ---"
+
+          if [ -d susfs4ksu/kernel_patches/fs ]; then
+
+            cp -a \
+              susfs4ksu/kernel_patches/fs/. \
+              fs/
+
+          else
+
+            echo "::error::SUSFS fs directory missing."
+
+            exit 1
+
+          fi
+
+
+          # --------------------------------------------------------
+          # Copy SUSFS Linux headers
+          # --------------------------------------------------------
+
+          echo
+          echo "--- Copying SUSFS headers ---"
+
+          if [ -d susfs4ksu/kernel_patches/include/linux ]; then
+
+            cp -a \
+              susfs4ksu/kernel_patches/include/linux/. \
+              include/linux/
+
+          else
+
+            echo "::error::SUSFS include/linux directory missing."
+
+            exit 1
+
+          fi
+
+
+          # --------------------------------------------------------
+          # Kernel patch
           # --------------------------------------------------------
 
           SUSFS_KERNEL_PATCH="susfs4ksu/kernel_patches/50_add_susfs_in_kernel-5.10.patch"
 
+          echo
+          echo "--- Checking kernel patch ---"
+
           if [ ! -f "$SUSFS_KERNEL_PATCH" ]; then
-            echo "::error::SUSFS 5.10 kernel patch not found:"
-            echo "$SUSFS_KERNEL_PATCH"
+
+            echo "::error::SUSFS 5.10 kernel patch not found."
+
             echo
-            echo "Available SUSFS kernel patches:"
+            echo "Expected:"
+            echo "$SUSFS_KERNEL_PATCH"
+
+            echo
+            echo "Available patches:"
+
             find susfs4ksu/kernel_patches \
               -maxdepth 1 \
               -type f \
               -name "*.patch" \
               -printf '%f\n' \
               | sort
+
             exit 1
+
           fi
 
-          patch -p1 < "$SUSFS_KERNEL_PATCH" || {
-            echo "::warning::SUSFS kernel patch had rejects."
-            echo "::warning::The assembled MTK kernel layout differs from the expected SUSFS patch layout."
-            echo "::warning::Build will continue so the actual rejected hunks can be inspected."
-          }
+          echo "Patch found:"
+          echo "$SUSFS_KERNEL_PATCH"
+
 
           # --------------------------------------------------------
-          # Apply SUSFS KernelSU patch
+          # Apply kernel SUSFS patch
           # --------------------------------------------------------
+
+          echo
+          echo "--- Applying SUSFS kernel patch ---"
+
+          patch \
+            --batch \
+            --forward \
+            -p1 \
+            < "$SUSFS_KERNEL_PATCH"
+
+
+          # --------------------------------------------------------
+          # KernelSU integration
+          # --------------------------------------------------------
+
+          echo
+          echo "--- Locating KernelSU integration ---"
 
           if [ -d KernelSU-Next ]; then
 
             SUSFS_KSU_PATCH="susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
 
-            if [ -f "$SUSFS_KSU_PATCH" ]; then
+            if [ ! -f "$SUSFS_KSU_PATCH" ]; then
 
-              cp \
-                "$SUSFS_KSU_PATCH" \
-                KernelSU-Next/
+              echo "::error::SUSFS KernelSU integration patch not found."
 
-              (
-                cd KernelSU-Next
-                patch -p1 < 10_enable_susfs_for_ksu.patch
-              ) || {
-                echo "::warning::SUSFS KSU patch had rejects."
-                echo "::warning::KernelSU-Next integration may require manual adaptation."
-              }
-
-            else
-
-              echo "::warning::KernelSU SUSFS patch not found:"
               echo "$SUSFS_KSU_PATCH"
+
+              exit 1
 
             fi
 
+            cp \
+              "$SUSFS_KSU_PATCH" \
+              KernelSU-Next/
+
+            echo
+            echo "--- Applying SUSFS KernelSU patch ---"
+
+            (
+              cd KernelSU-Next
+
+              patch \
+                --batch \
+                --forward \
+                -p1 \
+                < 10_enable_susfs_for_ksu.patch
+            )
+
+          elif [ -d KernelSU ]; then
+
+            SUSFS_KSU_PATCH="susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
+
+            if [ ! -f "$SUSFS_KSU_PATCH" ]; then
+
+              echo "::error::SUSFS KernelSU integration patch not found."
+
+              exit 1
+
+            fi
+
+            cp \
+              "$SUSFS_KSU_PATCH" \
+              KernelSU/
+
+            (
+              cd KernelSU
+
+              patch \
+                --batch \
+                --forward \
+                -p1 \
+                < 10_enable_susfs_for_ksu.patch
+            )
+
+          else
+
+            echo "::error::Could not find KernelSU source directory."
+
+            exit 1
+
           fi
 
+
           echo
-          echo "SUSFS patch stage completed."
+          echo "=========================================="
+          echo " SUSFS applied successfully"
+          echo "=========================================="
+
 
       # ============================================================
-      # APPLY DEFCONFIG FLAGS
+      # CONFIGURE KERNEL
       # ============================================================
 
-      - name: Apply defconfig flags
+      - name: Apply VenomCore configuration
+
         working-directory: ${{ env.KERNEL_DIR }}
+
         run: |
+
           set -e
 
           CFG="arch/${ARCH}/configs/${DEFCONFIG}"
 
           if [ ! -f "$CFG" ]; then
-            echo "::error::defconfig not found at $CFG"
+
+            echo "::error::Defconfig not found:"
+            echo "$CFG"
+
             exit 1
+
           fi
 
           echo "=========================================="
-          echo " Applying VenomCore configuration"
+          echo " VenomCore kernel configuration"
           echo "=========================================="
 
+          echo
+          echo "Using:"
+          echo "$CFG"
+
+          # --------------------------------------------------------
+          # Remove old duplicate entries first
+          # --------------------------------------------------------
+
+          sed -i \
+            -e '/^CONFIG_KSU=/d' \
+            -e '/^CONFIG_KSU_SUSFS=/d' \
+            -e '/^CONFIG_KSU_SUSFS_SUS_PATH=/d' \
+            -e '/^CONFIG_KSU_SUSFS_SUS_MOUNT=/d' \
+            -e '/^CONFIG_KSU_SUSFS_SUS_KSTAT=/d' \
+            -e '/^CONFIG_KSU_SUSFS_SUS_SU=/d' \
+            -e '/^CONFIG_KSU_SUSFS_TRY_UMOUNT=/d' \
+            -e '/^CONFIG_KSU_SUSFS_SPOOF_UNAME=/d' \
+            -e '/^CONFIG_KSU_SUSFS_OPEN_REDIRECT=/d' \
+            -e '/^CONFIG_LOCALVERSION=/d' \
+            "$CFG"
+
+
+          # --------------------------------------------------------
+          # KernelSU
+          # --------------------------------------------------------
+
           echo "CONFIG_KSU=y" >> "$CFG"
-          echo "CONFIG_KSU_SUSFS=${{ inputs.susfs_enabled && 'y' || 'n' }}" >> "$CFG"
-          echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> "$CFG"
-          echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> "$CFG"
-          echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> "$CFG"
-          echo "CONFIG_KSU_SUSFS_SUS_SU=n" >> "$CFG"
-          echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> "$CFG"
-          echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> "$CFG"
-          echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> "$CFG"
-          echo "CONFIG_LOCALVERSION=\"-${{ inputs.kernel_name }}\"" >> "$CFG"
+
+
+          # --------------------------------------------------------
+          # SUSFS
+          # --------------------------------------------------------
+
+          if [ "${{ inputs.susfs_enabled }}" = "true" ]; then
+
+            echo "CONFIG_KSU_SUSFS=y" >> "$CFG"
+            echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> "$CFG"
+            echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> "$CFG"
+            echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> "$CFG"
+            echo "CONFIG_KSU_SUSFS_SUS_SU=n" >> "$CFG"
+            echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> "$CFG"
+            echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> "$CFG"
+            echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> "$CFG"
+
+          else
+
+            echo "CONFIG_KSU_SUSFS=n" >> "$CFG"
+
+          fi
+
+
+          # --------------------------------------------------------
+          # Kernel local version
+          # --------------------------------------------------------
+
+          echo 'CONFIG_LOCALVERSION="-${{ inputs.kernel_name }}"' >> "$CFG"
+
 
           echo
-          echo "--- VenomCore config flags ---"
+          echo "--- Final requested config ---"
 
-          tail -n20 "$CFG"
+          tail -n30 "$CFG"
+
 
       # ============================================================
       # BUILD KERNEL
       # ============================================================
 
       - name: Build kernel
+
         working-directory: ${{ env.KERNEL_DIR }}
+
         run: |
-          set -e
 
-          export ARCH=${ARCH}
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          export CLANG_TRIPLE=aarch64-linux-gnu-
-          export CC=clang
-
-          # Keep the original clang-based build while explicitly
-          # providing the AArch64 GNU cross toolchain for binutils.
-          export HOSTCC=clang
-          export HOSTCXX=clang++
+          set -o pipefail
 
           echo "=========================================="
           echo " VenomCore Kernel Build"
           echo "=========================================="
 
+          export ARCH=arm64
+
+          # --------------------------------------------------------
+          # We intentionally do NOT install gcc-aarch64-linux-gnu.
+          #
+          # Android kernel is built with Android Clang.
+          # GNU AArch64 binutils are used through CROSS_COMPILE.
+          # --------------------------------------------------------
+
+          export LLVM=1
+          export LLVM_IAS=1
+
+          export CROSS_COMPILE=aarch64-linux-gnu-
+
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+
+          export CC=clang
+
+          export HOSTCC=clang
+          export HOSTCXX=clang++
+
           echo
           echo "ARCH          = ${ARCH}"
+          echo "LLVM          = ${LLVM}"
+          echo "LLVM_IAS      = ${LLVM_IAS}"
           echo "CROSS_COMPILE = ${CROSS_COMPILE}"
           echo "CLANG_TRIPLE  = ${CLANG_TRIPLE}"
           echo "CC            = ${CC}"
+          echo "HOSTCC        = ${HOSTCC}"
           echo "DEFCONFIG     = ${DEFCONFIG}"
+
           echo
+          echo "--- Compiler ---"
+
+          which clang
+          clang --version
+
+          echo
+          echo "--- Binutils ---"
+
+          which aarch64-linux-gnu-ld
+          which aarch64-linux-gnu-objcopy
+          which aarch64-linux-gnu-strip
+
+          # --------------------------------------------------------
+          # Clean output directory
+          # --------------------------------------------------------
+
+          rm -rf out
+
+          mkdir -p out
+
+
+          # ========================================================
+          # DEFCONFIG
+          # ========================================================
+
+          echo
+          echo "=========================================="
+          echo " Generating kernel configuration"
+          echo "=========================================="
 
           make \
             ARCH="${ARCH}" \
             O=out \
+            LLVM="${LLVM}" \
+            LLVM_IAS="${LLVM_IAS}" \
+            CROSS_COMPILE="${CROSS_COMPILE}" \
+            CLANG_TRIPLE="${CLANG_TRIPLE}" \
+            CC="${CC}" \
+            HOSTCC="${HOSTCC}" \
+            HOSTCXX="${HOSTCXX}" \
             "${DEFCONFIG}"
 
-          echo
-          echo "Configuration generated successfully."
 
           if [ ! -f out/.config ]; then
-            echo "::error::out/.config was not generated"
+
+            echo "::error::out/.config was not generated."
+
             exit 1
+
           fi
 
+
+          # ========================================================
+          # CHECK IMPORTANT CONFIGS
+          # ========================================================
+
           echo
-          echo "Starting kernel compilation..."
+          echo "=========================================="
+          echo " Checking generated configuration"
+          echo "=========================================="
+
+          echo
+          echo "KernelSU:"
+          grep -E '^CONFIG_KSU=' out/.config || true
+
+          echo
+          echo "SUSFS:"
+          grep -E '^CONFIG_KSU_SUSFS' out/.config || true
+
+          echo
+          echo "Local version:"
+          grep -E '^CONFIG_LOCALVERSION=' out/.config || true
+
+
+          # ========================================================
+          # BUILD
+          # ========================================================
+
+          echo
+          echo "=========================================="
+          echo " Starting kernel compilation"
+          echo "=========================================="
 
           make \
             ARCH="${ARCH}" \
             O=out \
+            LLVM="${LLVM}" \
+            LLVM_IAS="${LLVM_IAS}" \
             CROSS_COMPILE="${CROSS_COMPILE}" \
             CLANG_TRIPLE="${CLANG_TRIPLE}" \
             CC="${CC}" \
@@ -507,194 +1060,422 @@ jobs:
             -j"$(nproc --all)" \
             2>&1 | tee build.log
 
+
+          # ========================================================
+          # VERIFY OUTPUT
+          # ========================================================
+
+          echo
+          echo "=========================================="
+          echo " Checking kernel output"
+          echo "=========================================="
+
+          if [ -f out/arch/arm64/boot/Image.gz-dtb ]; then
+
+            echo "FOUND: Image.gz-dtb"
+
+          elif [ -f out/arch/arm64/boot/Image.gz ]; then
+
+            echo "FOUND: Image.gz"
+
+          elif [ -f out/arch/arm64/boot/Image ]; then
+
+            echo "FOUND: Image"
+
+          else
+
+            echo "::error::No kernel Image was produced."
+
+            echo
+            echo "--- boot directory ---"
+
+            find out/arch/arm64/boot \
+              -maxdepth 2 \
+              -type f \
+              -printf '%p\n' \
+              | sort
+
+            exit 1
+
+          fi
+
+
       # ============================================================
-      # PACKAGE BOOT IMAGE
+      # PACKAGE RAW IMAGE
       # ============================================================
 
-      - name: Package boot image
+      - name: Package raw kernel image
+
         working-directory: ${{ env.KERNEL_DIR }}
+
         run: |
+
           set -e
 
           mkdir -p ../VenomCore-out
 
-          IMG=$(find out \
-            -name "Image.gz-dtb" \
-            -o -name "Image.gz" \
-            -o -name "Image" \
-            | head -n1)
+          echo "=========================================="
+          echo " Packaging kernel image"
+          echo "=========================================="
 
-          if [ -z "$IMG" ]; then
-            echo "::error::no kernel Image produced — check build.log"
-            exit 1
+          IMG=""
+
+          if [ -f out/arch/arm64/boot/Image.gz-dtb ]; then
+
+            IMG="out/arch/arm64/boot/Image.gz-dtb"
+
+          elif [ -f out/arch/arm64/boot/Image.gz ]; then
+
+            IMG="out/arch/arm64/boot/Image.gz"
+
+          elif [ -f out/arch/arm64/boot/Image ]; then
+
+            IMG="out/arch/arm64/boot/Image"
+
           fi
 
-          echo "Kernel image:"
+
+          if [ -z "$IMG" ]; then
+
+            echo "::error::Kernel image not found."
+
+            exit 1
+
+          fi
+
+
+          echo "Selected image:"
           echo "$IMG"
 
-          cp "$IMG" ../VenomCore-out/Image
+          cp \
+            "$IMG" \
+            ../VenomCore-out/Image
+
+
+          echo
+          echo "Raw image:"
+          ls -lh ../VenomCore-out/Image
+
 
       # ============================================================
-      # ANYKERNEL3
+      # CLONE ANYKERNEL3
       # ============================================================
 
-      - name: Clone AnyKernel3 template
+      - name: Clone AnyKernel3
+
         run: |
+
           set -e
+
+          echo "=========================================="
+          echo " Preparing AnyKernel3"
+          echo "=========================================="
+
+          rm -rf AnyKernel3
 
           git clone \
             --depth=1 \
             https://github.com/osm0sis/AnyKernel3.git \
             AnyKernel3
 
+
+          # Remove git metadata
+
           rm -rf \
-            AnyKernel3/.git \
+            AnyKernel3/.git
+
+
+          # Remove default ramdisk / patch content
+
+          rm -rf \
             AnyKernel3/ramdisk \
             AnyKernel3/patch
+
+
+          # Remove original script and keycheck
 
           rm -f \
             AnyKernel3/tools/keycheck \
             AnyKernel3/anykernel.sh
 
+
+          # Copy kernel
+
           cp \
             VenomCore-out/Image \
             AnyKernel3/Image
 
+
+          echo
+          echo "--- AnyKernel3 contents ---"
+
+          ls -lah AnyKernel3
+
+
       # ============================================================
-      # ANYKERNEL SCRIPT
+      # WRITE ANYKERNEL SCRIPT
       # ============================================================
 
-      - name: Write anykernel.sh (VenomCore branded)
+      - name: Write VenomCore AnyKernel script
+
         run: |
+
+          set -e
+
           cat > AnyKernel3/anykernel.sh << 'EOF'
+
           ### AnyKernel3 Ramdisk Mod Script
-          ## osm0sis @ xda-developers
+          ## VenomCore Kernel
+          ## MkVenomPro
+          ##
+          ## Device: Redmi Note 15 4G
+          ## Codename: spinel
+          ## Android: 15
+          ## HyperOS: 2
+          ## Kernel: 5.10
 
           ### AnyKernel setup
+
           properties() { '
+
           kernel.string=VenomCore Kernel by MkVenomPro | spinel
+
           do.devicecheck=1
+
           do.modules=0
+
           do.systemless=1
+
           do.cleanup=1
+
           do.cleanuponabort=0
+
           device.name1=spinel
+
           supported.versions=15
+
           supported.patchlevels=
+
           '; }
 
-          ### AnyKernel methods (DO NOT CHANGE)
+
+          ### AnyKernel methods
+
           . tools/ak3-core.sh
 
-          ### AnyKernel install
+
+          ### VenomCore installer UI
+
           ui_print " "
           ui_print " "
-          ui_print "░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░"
+          ui_print "=============================================="
           ui_print " "
-          ui_print "   ██╗   ██╗███████╗███╗   ██╗ ██████╗ ███╗   ███╗"
-          ui_print "   ██║   ██║██╔════╝████╗  ██║██╔═══██╗████╗ ████║"
-          ui_print "   ██║   ██║█████╗  ██╔██╗ ██║██║   ██║██╔████╔██║"
-          ui_print "   ╚██╗ ██╔╝██╔══╝  ██║╚██╗██║██║   ██║██║╚██╔╝██║"
-          ui_print "    ╚████╔╝ ███████╗██║ ╚████║╚██████╔╝██║ ╚═╝ ██║"
-          ui_print "     ╚═══╝  ╚══════╝╚═╝  ╚═══╝ ╚═════╝ ╚═╝     ╚═╝"
+          ui_print "           V E N O M C O R E"
           ui_print " "
-          ui_print "            C  O  R  E   K  E  R  N  E  L"
+          ui_print "             K E R N E L"
           ui_print " "
-          ui_print "░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░"
+          ui_print "=============================================="
           ui_print " "
-          ui_print "        🐍  crafted by @MkVenomPro  🐍"
+          ui_print "        by MkVenomPro"
           ui_print " "
-          ui_print "───────────────────────────────────────"
-          ui_print "  Device .... Redmi Note 15 4G (spinel)"
-          ui_print "  Root ...... ${{ inputs.ksu_variant }}"
-          ui_print "  SUSFS ..... ${{ inputs.susfs_enabled }}"
-          ui_print "  Build ..... #${{ github.run_number }}"
-          ui_print "───────────────────────────────────────"
+          ui_print "----------------------------------------------"
           ui_print " "
-          ui_print "  >> Injecting VenomCore into boot..."
+          ui_print " Device : Redmi Note 15 4G"
+          ui_print " Codename : spinel"
+          ui_print " Android : 15"
+          ui_print " HyperOS : 2"
+          ui_print " Root : ${{ inputs.ksu_variant }}"
+          ui_print " SUSFS : ${{ inputs.susfs_enabled }}"
+          ui_print " Build : #${{ github.run_number }}"
           ui_print " "
+          ui_print "----------------------------------------------"
+          ui_print " "
+          ui_print " Injecting VenomCore..."
+          ui_print " "
+
+
+          ### Backup / unpack boot
 
           dump_boot
 
-          # kernel Image is already staged as ./Image by the workflow
+
+          ### Flash kernel
+
           write_boot
 
+
+          ### Finished
+
           ui_print " "
-          ui_print "───────────────────────────────────────"
-          ui_print "   ✔  VENOMCORE INSTALLED SUCCESSFULLY"
-          ui_print "───────────────────────────────────────"
+          ui_print "----------------------------------------------"
           ui_print " "
-          ui_print "   Reboot the device and enjoy the bite."
+          ui_print " VENOMCORE INSTALLED SUCCESSFULLY"
           ui_print " "
-          ui_print "        🐍  @MkVenomPro  🐍"
+          ui_print " Reboot your device."
           ui_print " "
+          ui_print "----------------------------------------------"
+          ui_print " "
+          ui_print " MkVenomPro"
+          ui_print " "
+
           EOF
+
+
+          echo
+          echo "--- AnyKernel script ---"
+
+          cat AnyKernel3/anykernel.sh
+
 
       # ============================================================
       # PACKAGE ANYKERNEL ZIP
       # ============================================================
 
-      - name: Package VenomCore AnyKernel3 zip
+      - name: Package VenomCore AnyKernel3 ZIP
+
         run: |
+
           set -e
 
           ZIP_NAME="VenomCore-spinel-${{ inputs.ksu_variant }}-build${{ github.run_number }}.zip"
+
+          echo "=========================================="
+          echo " Creating flashable ZIP"
+          echo "=========================================="
 
           cd AnyKernel3
 
           zip \
             -r9 \
-            "../$ZIP_NAME" \
+            "../${ZIP_NAME}" \
             . \
-            -x ".git*"
+            -x ".git*" \
+            -x "README.md"
+
 
           cd ..
 
-          echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
+          echo "ZIP_NAME=${ZIP_NAME}" >> "$GITHUB_ENV"
+
+          echo
+          echo "Created:"
+          ls -lh "${ZIP_NAME}"
+
 
       # ============================================================
-      # BUILD LOG
+      # UPLOAD BUILD LOG
       # ============================================================
 
-      - name: Upload build log (always, for debugging)
+      - name: Upload build log
+
         if: always()
+
         uses: actions/upload-artifact@v4
+
         with:
-          name: VenomCore-build-log
-          path: ${{ env.KERNEL_DIR }}/build.log
+          name: VenomCore-build-log-${{ github.run_number }}
+
+          path: |
+            ${{ env.KERNEL_DIR }}/build.log
+
           if-no-files-found: ignore
 
-      # ============================================================
-      # RAW KERNEL
-      # ============================================================
-
-      - name: Upload VenomCore raw kernel image
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ inputs.kernel_name }}-spinel-raw-${{ github.run_number }}
-          path: VenomCore-out/Image
           retention-days: 14
 
+
       # ============================================================
-      # FLASHABLE ZIP
+      # UPLOAD RAW IMAGE
       # ============================================================
 
-      - name: Upload VenomCore flashable zip
+      - name: Upload raw kernel image
+
+        if: success()
+
         uses: actions/upload-artifact@v4
+
+        with:
+          name: VenomCore-spinel-raw-${{ github.run_number }}
+
+          path: VenomCore-out/Image
+
+          if-no-files-found: error
+
+          retention-days: 14
+
+
+      # ============================================================
+      # UPLOAD FLASHABLE ZIP
+      # ============================================================
+
+      - name: Upload flashable AnyKernel3 ZIP
+
+        if: success()
+
+        uses: actions/upload-artifact@v4
+
         with:
           name: ${{ env.ZIP_NAME }}
+
           path: ${{ env.ZIP_NAME }}
+
+          if-no-files-found: error
+
           retention-days: 14
 
+
       # ============================================================
-      # SUMMARY
+      # BUILD SUMMARY
       # ============================================================
 
-      - name: Summary
+      - name: Build summary
+
         if: always()
+
         run: |
-          echo "### 🐍 ${{ inputs.kernel_name }} build finished" >> $GITHUB_STEP_SUMMARY
-          echo "- Source branch: ${{ inputs.source_branch }} (assembled tree, this repo)" >> $GITHUB_STEP_SUMMARY
-          echo "- Root: ${{ inputs.ksu_variant }}" >> $GITHUB_STEP_SUMMARY
-          echo "- SUSFS: ${{ inputs.susfs_enabled }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Defconfig used: ${DEFCONFIG:-not resolved}" >> $GITHUB_STEP_SUMMARY
+
+          echo "## 🐍 VenomCore Kernel Build" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "### Device" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "- Redmi Note 15 4G" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Codename: spinel" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Android: 15" >> "$GITHUB_STEP_SUMMARY"
+          echo "- HyperOS: 2" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Kernel: 5.10" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "### Build" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "- Source branch: \`${{ inputs.source_branch }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Root: \`${{ inputs.ksu_variant }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- SUSFS: \`${{ inputs.susfs_enabled }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Defconfig: \`${DEFCONFIG:-not resolved}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Build number: \`${{ github.run_number }}\`" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "### Toolchain" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "- Android Clang: master-kernel-build-2021" >> "$GITHUB_STEP_SUMMARY"
+          echo "- LLVM: enabled" >> "$GITHUB_STEP_SUMMARY"
+          echo "- LLVM IAS: enabled" >> "$GITHUB_STEP_SUMMARY"
+          echo "- AArch64 GNU binutils: enabled" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "### Output" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -f VenomCore-out/Image ]; then
+            echo "- Raw Image: generated" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- Raw Image: not generated" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [ -n "${ZIP_NAME:-}" ] && [ -f "${ZIP_NAME}" ]; then
+            echo "- AnyKernel3 ZIP: generated" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- AnyKernel3 ZIP: not generated" >> "$GITHUB_STEP_SUMMARY"
+          fi
