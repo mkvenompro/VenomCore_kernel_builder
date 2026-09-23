@@ -79,7 +79,7 @@ jobs:
           echo "--- top-level of MTK modules ---"
           ls mtk_modules_src
 
-      - name: Place modules as sibling: vendor/mediatek/kernel_modules/
+      - name: Place modules as sibling (vendor/mediatek/kernel_modules)
         run: |
           set -e
           DEST="$WORKDIR/vendor/mediatek/kernel_modules"
