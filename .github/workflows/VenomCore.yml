@@ -59,8 +59,8 @@ jobs:
           sudo apt-get install -y \
             bc bison build-essential ccache curl flex \
             g++-multilib gcc-multilib git gnupg gperf \
-            imagemagick lib32ncurses5-dev lib32readline-dev \
-            lib32z1-dev liblz4-tool libncurses5 libncurses5-dev \
+            imagemagick lib32ncurses-dev lib32readline-dev \
+            lib32z1-dev liblz4-tool libncurses-dev \
             libsdl1.2-dev libssl-dev libxml2 libxml2-utils \
             lzop pngcrush rsync schedtool squashfs-tools \
             xsltproc zip zlib1g-dev python3 python3-pip \
@@ -153,6 +153,87 @@ jobs:
           fi
           cp "$IMG" ../VenomCore-out/Image
 
+      - name: Clone AnyKernel3 template
+        run: |
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+          rm -rf AnyKernel3/.git AnyKernel3/ramdisk AnyKernel3/patch
+          rm -f AnyKernel3/tools/keycheck AnyKernel3/anykernel.sh
+          cp VenomCore-out/Image AnyKernel3/Image
+
+      - name: Write anykernel.sh (VenomCore branded)
+        run: |
+          cat > AnyKernel3/anykernel.sh << 'EOF'
+          ### AnyKernel3 Ramdisk Mod Script
+          ## osm0sis @ xda-developers
+
+          ### AnyKernel setup
+          properties() { '
+          kernel.string=VenomCore Kernel by MkVenomPro | spinel
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=1
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=spinel
+          supported.versions=15
+          supported.patchlevels=
+          '; }
+
+          ### AnyKernel methods (DO NOT CHANGE)
+          . tools/ak3-core.sh
+
+          ### AnyKernel install
+          ui_print " "
+          ui_print " "
+          ui_print "░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░"
+          ui_print " "
+          ui_print "   ██╗   ██╗███████╗███╗   ██╗ ██████╗ ███╗   ███╗"
+          ui_print "   ██║   ██║██╔════╝████╗  ██║██╔═══██╗████╗ ████║"
+          ui_print "   ██║   ██║█████╗  ██╔██╗ ██║██║   ██║██╔████╔██║"
+          ui_print "   ╚██╗ ██╔╝██╔══╝  ██║╚██╗██║██║   ██║██║╚██╔╝██║"
+          ui_print "    ╚████╔╝ ███████╗██║ ╚████║╚██████╔╝██║ ╚═╝ ██║"
+          ui_print "     ╚═══╝  ╚══════╝╚═╝  ╚═══╝ ╚═════╝ ╚═╝     ╚═╝"
+          ui_print " "
+          ui_print "            C  O  R  E   K  E  R  N  E  L"
+          ui_print " "
+          ui_print "░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░"
+          ui_print " "
+          ui_print "        🐍  crafted by @MkVenomPro  🐍"
+          ui_print " "
+          ui_print "───────────────────────────────────────"
+          ui_print "  Device .... Redmi Note 15 4G (spinel)"
+          ui_print "  Root ...... ${{ inputs.ksu_variant }}"
+          ui_print "  SUSFS ..... ${{ inputs.susfs_enabled }}"
+          ui_print "  Build ..... #${{ github.run_number }}"
+          ui_print "───────────────────────────────────────"
+          ui_print " "
+          ui_print "  >> Injecting VenomCore into boot..."
+          ui_print " "
+
+          dump_boot
+
+          # kernel Image is already staged as ./Image by the workflow
+          write_boot
+
+          ui_print " "
+          ui_print "───────────────────────────────────────"
+          ui_print "   ✔  VENOMCORE INSTALLED SUCCESSFULLY"
+          ui_print "───────────────────────────────────────"
+          ui_print " "
+          ui_print "   Reboot the device and enjoy the bite."
+          ui_print " "
+          ui_print "        🐍  @MkVenomPro  🐍"
+          ui_print " "
+          EOF
+
+      - name: Package VenomCore AnyKernel3 zip
+        run: |
+          ZIP_NAME="VenomCore-spinel-${{ inputs.ksu_variant }}-build${{ github.run_number }}.zip"
+          cd AnyKernel3
+          zip -r9 "../$ZIP_NAME" . -x ".git*"
+          cd ..
+          echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
+
       - name: Upload build log (always, for debugging)
         if: always()
         uses: actions/upload-artifact@v4
@@ -160,11 +241,18 @@ jobs:
           name: VenomCore-build-log
           path: ${{ env.KERNEL_DIR }}/build.log
 
-      - name: Upload VenomCore kernel image
+      - name: Upload VenomCore raw kernel image
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ inputs.kernel_name }}-spinel-${{ github.run_number }}
+          name: ${{ inputs.kernel_name }}-spinel-raw-${{ github.run_number }}
           path: VenomCore-out/Image
+          retention-days: 14
+
+      - name: Upload VenomCore flashable zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ZIP_NAME }}
+          path: ${{ env.ZIP_NAME }}
           retention-days: 14
 
       - name: Summary
@@ -174,4 +262,5 @@ jobs:
           echo "- Branch: $KERNEL_BRANCH" >> $GITHUB_STEP_SUMMARY
           echo "- Root: ${{ inputs.ksu_variant }}" >> $GITHUB_STEP_SUMMARY
           echo "- SUSFS: ${{ inputs.susfs_enabled }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Next step: magiskboot repack this Image into the Android 15 stock boot.img, fastboot boot it before flashing" >> $GITHUB_STEP_SUMMARY
+          echo "- Flashable zip: $ZIP_NAME (flash from TWRP/OrangeFox, applies to the currently active slot)" >> $GITHUB_STEP_SUMMARY
+          echo "- Raw Image also uploaded separately if you want to repack a boot.img manually" >> $GITHUB_STEP_SUMMARY
