@@ -534,6 +534,12 @@ jobs:
       # ============================================================
       # BUILD KERNEL
       # ============================================================
+      # NOTE: LLVM=1 / LLVM_IAS=1 were REMOVED here. The AOSP clang prebuilt
+      # branch used above does not ship a working ld.lld on PATH, which made
+      # kbuild fail with "linker 'ld.lld' not found". Since binutils-aarch64-
+      # linux-gnu is already installed, we build with clang as the compiler
+      # but GNU aarch64-linux-gnu-ld as the linker instead — a standard,
+      # working combo for older (5.10-era) Android kernels.
 
       - name: Build kernel
         working-directory: ${{ env.KERNEL_DIR }}
@@ -545,8 +551,6 @@ jobs:
           echo "=============================================="
 
           export ARCH=arm64
-          export LLVM=1
-          export LLVM_IAS=1
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CLANG_TRIPLE=aarch64-linux-gnu-
           export CC=clang
@@ -559,8 +563,6 @@ jobs:
           make \
             ARCH="${ARCH}" \
             O=out \
-            LLVM="${LLVM}" \
-            LLVM_IAS="${LLVM_IAS}" \
             CROSS_COMPILE="${CROSS_COMPILE}" \
             CLANG_TRIPLE="${CLANG_TRIPLE}" \
             CC="${CC}" \
@@ -578,8 +580,6 @@ jobs:
           make \
             ARCH="${ARCH}" \
             O=out \
-            LLVM="${LLVM}" \
-            LLVM_IAS="${LLVM_IAS}" \
             CROSS_COMPILE="${CROSS_COMPILE}" \
             CLANG_TRIPLE="${CLANG_TRIPLE}" \
             CC="${CC}" \
@@ -665,11 +665,10 @@ jobs:
         if: always()
         run: |
           {
-            echo "## 🐍 VenomCore (spinel)"
-            echo "- Root: **${{ inputs.ksu_variant }}**"
-            echo "- SUSFS: **${{ inputs.susfs_enabled }}**"
-            echo "- Kernel name: \`${{ inputs.kernel_name }}\`"
-            echo "- Defconfig: \`${{ env.DEFCONFIG }}\`"
-            echo "- Image: \`${{ env.KERNEL_IMAGE }}\`"
-            echo "- Commit: ${{ github.sha }}"
+            echo "### 🐍 ${{ inputs.kernel_name }} — spinel build"
+            echo "- Source branch: \`${{ inputs.source_branch }}\`"
+            echo "- Root: ${{ inputs.ksu_variant }}"
+            echo "- SUSFS: ${{ inputs.susfs_enabled }} (ref: ${{ inputs.susfs_ref }})"
+            echo "- Defconfig: ${DEFCONFIG:-not resolved}"
+            echo "- Kernel image: ${KERNEL_IMAGE:-not produced}"
           } >> "$GITHUB_STEP_SUMMARY"
