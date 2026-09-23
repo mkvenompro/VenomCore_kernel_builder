@@ -1,266 +1,166 @@
-name: 🐍 VenomCore Kernel Builder (spinel)
+name: 🧩 VenomCore Tree Assembler (spinel)
 
-# VenomCore — custom kernel build for Xiaomi Redmi Note 15 4G (spinel)
-# Base: MiCode spinel-v-oss (kernel 5.10, Android 15) + KernelSU-Next + SUSFS
+# Merges the raw MiCode sources into ONE proper kernel tree and pushes it
+# to a branch in THIS repo, so the build workflow has something sane to build from.
+#
+# Sources merged:
+#   - MiCode/Xiaomi_Kernel_OpenSource (spinel-v-oss)   -> base kernel tree
+#   - MiCode/MTK_kernel_modules       (spinel-v-oss)   -> merged into the tree
+#   - MiCode/kernel_build             (spinel-v-oss)   -> kept as kernel_build/ for reference
+#
+# Result is pushed (squashed, single commit) to: spinel-assembled
 # Maintainer: MkVenomPro
 
 on:
   workflow_dispatch:
     inputs:
-      ksu_variant:
-        description: "Root solution"
+      target_branch:
+        description: "Branch in THIS repo to push the assembled tree to"
         required: true
-        default: "KernelSU-Next"
-        type: choice
-        options:
-          - KernelSU-Next
-          - SukiSU-Ultra
-      susfs_enabled:
-        description: "Enable SUSFS"
-        required: true
-        default: true
-        type: boolean
-      kernel_name:
-        description: "Kernel build name (shown in kernel version string)"
-        required: true
-        default: "VenomCore"
+        default: "spinel-assembled"
+
+permissions:
+  contents: write
 
 env:
-  DEVICE_CODENAME: spinel
   KERNEL_BRANCH: spinel-v-oss
   KERNEL_REPO: https://github.com/MiCode/Xiaomi_Kernel_OpenSource
-  KERNEL_BUILD_REPO: https://github.com/MiCode/kernel_build
   MTK_MODULES_REPO: https://github.com/MiCode/MTK_kernel_modules
-  KERNEL_DIR: kernel_workspace
-  DEFCONFIG: spinel_defconfig
-  ARCH: arm64
-  CLANG_VERSION: r487747c   # adjust to whatever kernel_build/build.config pins
+  KERNEL_BUILD_REPO: https://github.com/MiCode/kernel_build
+  WORKDIR: assembled_tree
 
 jobs:
-  build:
-    name: Build ${{ inputs.kernel_name }}
+  assemble:
+    name: Assemble spinel tree
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 60
 
     steps:
       - name: Maximize build space
         uses: easimon/maximize-build-space@master
         with:
-          root-reserve-mb: 8192
-          swap-size-mb: 4096
+          root-reserve-mb: 4096
           remove-dotnet: true
           remove-android: true
           remove-haskell: true
           remove-codeql: true
 
-      - name: Install dependencies
+      - name: Clone base kernel tree (Xiaomi_Kernel_OpenSource, ${{ env.KERNEL_BRANCH }})
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            bc bison build-essential ccache curl flex \
-            g++-multilib gcc-multilib git gnupg gperf \
-            imagemagick lib32ncurses-dev lib32readline-dev \
-            lib32z1-dev liblz4-tool libncurses-dev \
-            libsdl1.2-dev libssl-dev libxml2 libxml2-utils \
-            lzop pngcrush rsync schedtool squashfs-tools \
-            xsltproc zip zlib1g-dev python3 python3-pip \
-            device-tree-compiler libc6-dev-i386
+          set -e
+          git clone --depth=1 -b "$KERNEL_BRANCH" "$KERNEL_REPO" "$WORKDIR"
+          echo "--- top-level of base tree ---"
+          ls "$WORKDIR"
 
-      - name: Clone kernel source (${{ env.KERNEL_BRANCH }})
+      - name: Clone MTK kernel modules (${{ env.KERNEL_BRANCH }})
         run: |
-          git clone --depth=1 -b $KERNEL_BRANCH $KERNEL_REPO $KERNEL_DIR
+          set -e
+          git clone --depth=1 -b "$KERNEL_BRANCH" "$MTK_MODULES_REPO" mtk_modules_src
+          echo "--- top-level of MTK modules ---"
+          ls mtk_modules_src
 
-      - name: Clone kernel_build (build scripts)
+      - name: Merge MTK modules into the tree
         run: |
-          git clone --depth=1 -b $KERNEL_BRANCH $KERNEL_BUILD_REPO kernel_build
+          set -e
+          # Known merge points from similar MT68xx/MT69xx trees:
+          #   drivers/misc/mediatek/  and  drivers/gpu/mediatek/
+          # We overlay anything matching that shape, and ALSO keep a raw copy
+          # under vendor/mtk_modules/ so nothing is silently dropped if the
+          # folder layout in this particular dump doesn't match 1:1.
+          mkdir -p "$WORKDIR/vendor/mtk_modules_raw"
+          rsync -a mtk_modules_src/ "$WORKDIR/vendor/mtk_modules_raw/" --exclude=".git"
 
-      - name: Clone MTK external kernel modules
-        run: |
-          git clone --depth=1 -b $KERNEL_BRANCH $MTK_MODULES_REPO $KERNEL_DIR/mtk_modules
-
-      - name: Set up Clang toolchain
-        run: |
-          mkdir -p clang
-          # Pull the exact clang version pinned in kernel_build/build.config once you confirm it
-          curl -Ls "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/tags/${CLANG_VERSION}/clang-${CLANG_VERSION}.tar.gz" | tar -xz -C clang
-          echo "$(pwd)/clang/bin" >> $GITHUB_PATH
-
-      - name: Set up KernelSU-Next
-        if: ${{ inputs.ksu_variant == 'KernelSU-Next' }}
-        working-directory: ${{ env.KERNEL_DIR }}
-        run: |
-          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s next
-          echo "KSU_GIT_VERSION=$(cd KernelSU-Next && git rev-list --count HEAD)" >> $GITHUB_ENV
-
-      - name: Set up SukiSU-Ultra
-        if: ${{ inputs.ksu_variant == 'SukiSU-Ultra' }}
-        working-directory: ${{ env.KERNEL_DIR }}
-        run: |
-          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-main
-
-      - name: Apply SUSFS patches
-        if: ${{ inputs.susfs_enabled }}
-        working-directory: ${{ env.KERNEL_DIR }}
-        run: |
-          git clone --depth=1 -b kernel-5.10 https://gitlab.com/simonpunk/susfs4ksu.git susfs4ksu
-
-          cp susfs4ksu/kernel_patches/fs/* fs/ 2>/dev/null || true
-          cp susfs4ksu/kernel_patches/include/linux/* include/linux/ 2>/dev/null || true
-
-          patch -p1 < susfs4ksu/kernel_patches/50_add_susfs_in_kernel-5.10.patch || \
-            echo "::warning::susfs kernel patch had rejects — resolve manually before shipping"
-
-          if [ -d KernelSU-Next ]; then
-            cp susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch KernelSU-Next/ 2>/dev/null || true
-            (cd KernelSU-Next && patch -p1 < 10_enable_susfs_for_ksu.patch) || \
-              echo "::warning::susfs KSU patch had rejects — resolve manually before shipping"
+          if [ -d "mtk_modules_src/drivers" ]; then
+            echo "Found drivers/ in MTK modules — merging directly into tree drivers/"
+            rsync -a mtk_modules_src/drivers/ "$WORKDIR/drivers/"
           fi
 
-      - name: Apply defconfig flags
-        working-directory: ${{ env.KERNEL_DIR }}
+          echo "::notice::Raw MTK modules also preserved under vendor/mtk_modules_raw/ — inspect it and adjust merge paths in this step if it doesn't match drivers/misc/mediatek or drivers/gpu/mediatek."
+
+      - name: Clone kernel_build (kept for reference, not merged into source)
         run: |
-          CFG=arch/${ARCH}/configs/${DEFCONFIG}
-          echo "CONFIG_KSU=y" >> $CFG
-          echo "CONFIG_KSU_SUSFS=${{ inputs.susfs_enabled && 'y' || 'n' }}" >> $CFG
-          echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> $CFG
-          echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> $CFG
-          echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> $CFG
-          echo "CONFIG_KSU_SUSFS_SUS_SU=n" >> $CFG
-          echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> $CFG
-          echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> $CFG
-          echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> $CFG
-          echo "CONFIG_LOCALVERSION=\"-${{ inputs.kernel_name }}\"" >> $CFG
+          set -e
+          git clone --depth=1 -b "$KERNEL_BRANCH" "$KERNEL_BUILD_REPO" "$WORKDIR/kernel_build"
+          rm -rf "$WORKDIR/kernel_build/.git"
 
-      - name: Build kernel
-        working-directory: ${{ env.KERNEL_DIR }}
+      - name: Write assembly notes into the tree
         run: |
-          export ARCH=${ARCH}
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          export CLANG_TRIPLE=aarch64-linux-gnu-
-          export CC=clang
+          cat > "$WORKDIR/VENOMCORE_ASSEMBLY.md" << 'EOF'
+          # VenomCore assembled tree — spinel
 
-          make O=out ${DEFCONFIG}
-          make O=out -j$(nproc --all) 2>&1 | tee build.log
+          Assembled automatically by the "VenomCore Tree Assembler" workflow.
 
-      - name: Package boot image
-        working-directory: ${{ env.KERNEL_DIR }}
-        run: |
-          mkdir -p ../VenomCore-out
-          IMG=$(find out -name "Image.gz-dtb" -o -name "Image.gz" -o -name "Image" | head -n1)
-          if [ -z "$IMG" ]; then
-            echo "::error::no kernel Image produced — check build.log"
-            exit 1
-          fi
-          cp "$IMG" ../VenomCore-out/Image
+          Sources merged (all branch: spinel-v-oss):
+          - MiCode/Xiaomi_Kernel_OpenSource -> base tree (this repo root)
+          - MiCode/MTK_kernel_modules       -> merged into drivers/ where possible,
+                                               full raw copy kept in vendor/mtk_modules_raw/
+          - MiCode/kernel_build             -> kept under kernel_build/ (build scripts, unmerged)
 
-      - name: Clone AnyKernel3 template
-        run: |
-          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
-          rm -rf AnyKernel3/.git AnyKernel3/ramdisk AnyKernel3/patch
-          rm -f AnyKernel3/tools/keycheck AnyKernel3/anykernel.sh
-          cp VenomCore-out/Image AnyKernel3/Image
+          Base tag: alps-mp-s0.mp1.tc8sp2-cs1-xm.V1.143.1
 
-      - name: Write anykernel.sh (VenomCore branded)
-        run: |
-          cat > AnyKernel3/anykernel.sh << 'EOF'
-          ### AnyKernel3 Ramdisk Mod Script
-          ## osm0sis @ xda-developers
+          ⚠️ This is a MECHANICAL merge (rsync overlay), not a verified working
+          kernel tree. The MTK modules merge path is a best guess based on a
+          similar MT6789 device (yunluo) — check vendor/mtk_modules_raw/ and
+          confirm the real drivers/ layout before trusting a build from this.
 
-          ### AnyKernel setup
-          properties() { '
-          kernel.string=VenomCore Kernel by MkVenomPro | spinel
-          do.devicecheck=1
-          do.modules=0
-          do.systemless=1
-          do.cleanup=1
-          do.cleanuponabort=0
-          device.name1=spinel
-          supported.versions=15
-          supported.patchlevels=
-          '; }
-
-          ### AnyKernel methods (DO NOT CHANGE)
-          . tools/ak3-core.sh
-
-          ### AnyKernel install
-          ui_print " "
-          ui_print " "
-          ui_print "░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░"
-          ui_print " "
-          ui_print "   ██╗   ██╗███████╗███╗   ██╗ ██████╗ ███╗   ███╗"
-          ui_print "   ██║   ██║██╔════╝████╗  ██║██╔═══██╗████╗ ████║"
-          ui_print "   ██║   ██║█████╗  ██╔██╗ ██║██║   ██║██╔████╔██║"
-          ui_print "   ╚██╗ ██╔╝██╔══╝  ██║╚██╗██║██║   ██║██║╚██╔╝██║"
-          ui_print "    ╚████╔╝ ███████╗██║ ╚████║╚██████╔╝██║ ╚═╝ ██║"
-          ui_print "     ╚═══╝  ╚══════╝╚═╝  ╚═══╝ ╚═════╝ ╚═╝     ╚═╝"
-          ui_print " "
-          ui_print "            C  O  R  E   K  E  R  N  E  L"
-          ui_print " "
-          ui_print "░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░"
-          ui_print " "
-          ui_print "        🐍  crafted by @MkVenomPro  🐍"
-          ui_print " "
-          ui_print "───────────────────────────────────────"
-          ui_print "  Device .... Redmi Note 15 4G (spinel)"
-          ui_print "  Root ...... ${{ inputs.ksu_variant }}"
-          ui_print "  SUSFS ..... ${{ inputs.susfs_enabled }}"
-          ui_print "  Build ..... #${{ github.run_number }}"
-          ui_print "───────────────────────────────────────"
-          ui_print " "
-          ui_print "  >> Injecting VenomCore into boot..."
-          ui_print " "
-
-          dump_boot
-
-          # kernel Image is already staged as ./Image by the workflow
-          write_boot
-
-          ui_print " "
-          ui_print "───────────────────────────────────────"
-          ui_print "   ✔  VENOMCORE INSTALLED SUCCESSFULLY"
-          ui_print "───────────────────────────────────────"
-          ui_print " "
-          ui_print "   Reboot the device and enjoy the bite."
-          ui_print " "
-          ui_print "        🐍  @MkVenomPro  🐍"
-          ui_print " "
+          Regenerate this branch any time by re-running the assembler workflow.
           EOF
 
-      - name: Package VenomCore AnyKernel3 zip
+      - name: Check for files over GitHub's 100MB push limit
+        working-directory: ${{ env.WORKDIR }}
         run: |
-          ZIP_NAME="VenomCore-spinel-${{ inputs.ksu_variant }}-build${{ github.run_number }}.zip"
-          cd AnyKernel3
-          zip -r9 "../$ZIP_NAME" . -x ".git*"
-          cd ..
-          echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
+          set -e
+          BIG=$(find . -type f -size +95M -not -path "./.git/*" || true)
+          if [ -n "$BIG" ]; then
+            echo "::warning::files over ~95MB found — GitHub rejects pushes with files >100MB without Git LFS. Excluding them from the commit so the push doesn't fail:"
+            echo "$BIG"
+            echo "$BIG" | sed 's|^\./||' > /tmp/big_files.txt
+            while IFS= read -r f; do
+              [ -n "$f" ] && rm -f "$f" && echo "removed: $f"
+            done < /tmp/big_files.txt
+            {
+              echo ""
+              echo "## Files excluded (over 100MB, need Git LFS if you want them)"
+              cat /tmp/big_files.txt
+            } >> VENOMCORE_ASSEMBLY.md
+          else
+            echo "No files over 95MB — good."
+          fi
 
-      - name: Upload build log (always, for debugging)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: VenomCore-build-log
-          path: ${{ env.KERNEL_DIR }}/build.log
+      - name: Commit assembled tree
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          set -e
+          rm -rf .git   # drop the .git from the original MiCode clone so this becomes a fresh, independent repo
+          git init -q
+          git config user.name "VenomCore Assembler Bot"
+          git config user.email "actions@github.com"
+          git checkout -q -b "${{ inputs.target_branch }}"
+          git add -A
+          git commit -q -m "VenomCore: assemble spinel tree ($(date -u +%Y-%m-%d))"
+          echo "Commit created. Object count:"
+          git count-objects -v
 
-      - name: Upload VenomCore raw kernel image
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ inputs.kernel_name }}-spinel-raw-${{ github.run_number }}
-          path: VenomCore-out/Image
-          retention-days: 14
-
-      - name: Upload VenomCore flashable zip
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.ZIP_NAME }}
-          path: ${{ env.ZIP_NAME }}
-          retention-days: 14
+      - name: Push assembled tree to this repo
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          set -e
+          git remote remove origin 2>/dev/null || true
+          git remote add origin "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
+          echo "Pushing to branch ${{ inputs.target_branch }} ..."
+          if ! git push --force origin "${{ inputs.target_branch }}" 2>push_error.log; then
+            echo "::error::push failed — printing the raw git error below"
+            cat push_error.log
+            echo ""
+            echo "::error::most likely cause: repo Settings → Actions → General → Workflow permissions is set to 'Read repository contents permission (read only)'. Switch it to 'Read and write permissions' and re-run this workflow."
+            exit 1
+          fi
+          echo "Push succeeded."
 
       - name: Summary
         run: |
-          echo "### 🐍 ${{ inputs.kernel_name }} build finished" >> $GITHUB_STEP_SUMMARY
-          echo "- Device: spinel (Redmi Note 15 4G)" >> $GITHUB_STEP_SUMMARY
-          echo "- Branch: $KERNEL_BRANCH" >> $GITHUB_STEP_SUMMARY
-          echo "- Root: ${{ inputs.ksu_variant }}" >> $GITHUB_STEP_SUMMARY
-          echo "- SUSFS: ${{ inputs.susfs_enabled }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Flashable zip: $ZIP_NAME (flash from TWRP/OrangeFox, applies to the currently active slot)" >> $GITHUB_STEP_SUMMARY
-          echo "- Raw Image also uploaded separately if you want to repack a boot.img manually" >> $GITHUB_STEP_SUMMARY
+          echo "### 🧩 spinel tree assembled" >> $GITHUB_STEP_SUMMARY
+          echo "- Pushed to branch: \`${{ inputs.target_branch }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Base: Xiaomi_Kernel_OpenSource @ $KERNEL_BRANCH" >> $GITHUB_STEP_SUMMARY
+          echo "- MTK modules merged into drivers/ (best-effort) + raw copy in vendor/mtk_modules_raw/" >> $GITHUB_STEP_SUMMARY
+          echo "- ⚠️ Review VENOMCORE_ASSEMBLY.md in that branch before building from it" >> $GITHUB_STEP_SUMMARY
